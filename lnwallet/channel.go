@@ -278,6 +278,91 @@ type PaymentDescriptor struct {
 	isForwarded bool
 }
 
+func (lc *LightningChannel) PayDescsFromRemoteLogUpdates(
+	logUpdates []channeldb.LogUpdate) []*PaymentDescriptor {
+
+	lc.Lock()
+	defer lc.Unlock()
+
+	var payDescs []*PaymentDescriptor
+	for _, logUpdate := range logUpdates {
+		var pd *PaymentDescriptor
+		switch wireMsg := logUpdate.UpdateMsg.(type) {
+
+		// For offered HTLC's, we'll map that to a PaymentDescriptor
+		// with the type Add, ensuring we restore the necessary fields.
+		// From the PoV of the commitment chain, this HTLC was included
+		// in the remote chain, but not the local chain.
+		case *lnwire.UpdateAddHTLC:
+			// First, we'll map all the relevant fields in the
+			// UpdateAddHTLC message to their corresponding fields in the
+			// PaymentDescriptor struct. We also set addCommitHeightRemote
+			// as we've included this HTLC in our local commitment chain
+			// for the remote party.
+			pd = &PaymentDescriptor{
+				RHash:     wireMsg.PaymentHash,
+				Timeout:   wireMsg.Expiry,
+				Amount:    wireMsg.Amount,
+				EntryType: Add,
+				HtlcIndex: wireMsg.ID,
+				LogIndex:  logUpdate.LogIndex,
+			}
+			pd.OnionBlob = make([]byte, len(wireMsg.OnionBlob))
+			copy(pd.OnionBlob[:], wireMsg.OnionBlob[:])
+
+		// For HTLC's we we're offered we'll fetch the original offered HTLc
+		// from the remote party's update log so we can retrieve the same
+		// PaymentDescriptor that SettleHTLC would produce.
+		case *lnwire.UpdateFufillHTLC:
+			ogHTLC := lc.remoteUpdateLog.lookupHtlc(wireMsg.ID)
+
+			pd = &PaymentDescriptor{
+				Amount:      ogHTLC.Amount,
+				RPreimage:   wireMsg.PaymentPreimage,
+				LogIndex:    logUpdate.LogIndex,
+				ParentIndex: wireMsg.ID,
+				EntryType:   Settle,
+			}
+
+		// If we sent a failure for a prior incoming HTLC, then we'll consult
+		// the update log of the remote party so we can retrieve the
+		// information of the original HTLC we're failing. We also set the
+		// removal height for the remote commitment.
+		case *lnwire.UpdateFailHTLC:
+			ogHTLC := lc.remoteUpdateLog.lookupHtlc(wireMsg.ID)
+
+			pd = &PaymentDescriptor{
+				Amount:      ogHTLC.Amount,
+				RHash:       ogHTLC.RHash,
+				ParentIndex: ogHTLC.HtlcIndex,
+				LogIndex:    logUpdate.LogIndex,
+				EntryType:   Fail,
+				FailReason:  wireMsg.Reason[:],
+			}
+
+		// HTLC fails due to malformed onion blobs are treated the exact same
+		// way as regular HTLC fails.
+		case *lnwire.UpdateFailMalformedHTLC:
+			ogHTLC := lc.remoteUpdateLog.lookupHtlc(wireMsg.ID)
+			// TODO(roasbeef): err if nil?
+
+			pd = &PaymentDescriptor{
+				Amount:       ogHTLC.Amount,
+				RHash:        ogHTLC.RHash,
+				ParentIndex:  ogHTLC.HtlcIndex,
+				LogIndex:     logUpdate.LogIndex,
+				EntryType:    MalformedFail,
+				FailCode:     wireMsg.FailureCode,
+				ShaOnionBlob: wireMsg.ShaOnionBlob,
+			}
+		}
+
+		payDescs = append(payDescs, pd)
+	}
+
+	return payDescs
+}
+
 // commitment represents a commitment to a new state within an active channel.
 // New commitments can be initiated by either side. Commitments are ordered
 // into a commitment chain, with one existing for both parties. Each side can
@@ -953,7 +1038,7 @@ type updateLog struct {
 	updateIndex map[uint64]*list.Element
 
 	// offerIndex is an index that maps the counter for offered HTLC's to
-	// their list elemtn within the main list.List.
+	// their list element within the main list.List.
 	htlcIndex map[uint64]*list.Element
 }
 
@@ -2584,6 +2669,7 @@ func (lc *LightningChannel) createCommitDiff(
 	// were only just committed within this pending state. This will be the
 	// set of items we need to retransmit if we reconnect and find that
 	// they didn't process this new state fully.
+	var removeParents []uint64
 	for e := lc.localUpdateLog.Front(); e != nil; e = e.Next() {
 		pd := e.Value.(*PaymentDescriptor)
 
@@ -2625,6 +2711,7 @@ func (lc *LightningChannel) createCommitDiff(
 				ID:              pd.ParentIndex,
 				PaymentPreimage: pd.RPreimage,
 			}
+			removeParents = append(removeParents, pd.ParentIndex)
 
 		case Fail:
 			logUpdate.UpdateMsg = &lnwire.UpdateFailHTLC{
@@ -2632,6 +2719,7 @@ func (lc *LightningChannel) createCommitDiff(
 				ID:     pd.ParentIndex,
 				Reason: pd.FailReason,
 			}
+			removeParents = append(removeParents, pd.ParentIndex)
 
 		case MalformedFail:
 			logUpdate.UpdateMsg = &lnwire.UpdateFailMalformedHTLC{
@@ -2640,6 +2728,7 @@ func (lc *LightningChannel) createCommitDiff(
 				ShaOnionBlob: pd.ShaOnionBlob,
 				FailureCode:  pd.FailCode,
 			}
+			removeParents = append(removeParents, pd.ParentIndex)
 		}
 
 		logUpdates = append(logUpdates, logUpdate)
@@ -2649,6 +2738,8 @@ func (lc *LightningChannel) createCommitDiff(
 	// convert the in-memory commit into a format suitable for writing to
 	// disk.
 	diskCommit := newCommit.toDiskCommit(false)
+
+	walletLog.Infof("Signing commit height: %d", diskCommit.CommitHeight)
 
 	return &channeldb.CommitDiff{
 		Commitment: *diskCommit,
@@ -2660,6 +2751,7 @@ func (lc *LightningChannel) createCommitDiff(
 			HtlcSigs:  htlcSigs,
 		},
 		LogUpdates: logUpdates,
+		//RemoveParents: removeParents,
 	}, nil
 }
 
@@ -3505,7 +3597,9 @@ func (lc *LightningChannel) RevokeCurrentCommitment() (*lnwire.RevokeAndAck, []c
 // successful, then the remote commitment chain is advanced by a single
 // commitment, and a log compaction is attempted. In addition, a slice of
 // HTLC's which can be forwarded upstream are returned.
-func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) ([]*PaymentDescriptor, error) {
+func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
+	*channeldb.FwdPkg, []*PaymentDescriptor, []*PaymentDescriptor, error) {
+
 	lc.Lock()
 	defer lc.Unlock()
 
@@ -3513,10 +3607,10 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) ([]*P
 	store := lc.channelState.RevocationStore
 	revocation, err := chainhash.NewHash(revMsg.Revocation[:])
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	if err := store.AddNextEntry(revocation); err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 
 	// Verify that if we use the commitment point computed based off of the
@@ -3525,7 +3619,7 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) ([]*P
 	currentCommitPoint := lc.channelState.RemoteCurrentRevocation
 	derivedCommitPoint := ComputeCommitmentPoint(revMsg.Revocation[:])
 	if !derivedCommitPoint.IsEqual(currentCommitPoint) {
-		return nil, fmt.Errorf("revocation key mismatch")
+		return nil, nil, nil, fmt.Errorf("revocation key mismatch")
 	}
 
 	// Now that we've verified that the prior commitment has been properly
@@ -3541,36 +3635,33 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) ([]*P
 		lc.remoteCommitChain.tail().height,
 		lc.remoteCommitChain.tail().height+1)
 
-	// At this point, the revocation has been accepted, and we've rotated
-	// the current revocation key+hash for the remote party. Therefore we
-	// sync now to ensure the revocation producer state is consistent with
-	// the current commitment height and also to advance the on-disk
-	// commitment chain.
-	if err := lc.channelState.AdvanceCommitChainTail(); err != nil {
-		return nil, err
-	}
-
-	// Since they revoked the current lowest height in their commitment
-	// chain, we can advance their chain by a single commitment.
-	lc.remoteCommitChain.advanceTail()
-
-	remoteChainTail := lc.remoteCommitChain.tail().height
+	remoteChainTail := lc.remoteCommitChain.tail().height + 1
 	localChainTail := lc.localCommitChain.tail().height
 
-	// Now that we've verified the revocation update the state of the HTLC
-	// log as we may be able to prune portions of it now, and update their
-	// balance.
-	var htlcsToForward []*PaymentDescriptor
-	for e := lc.remoteUpdateLog.Front(); e != nil; e = e.Next() {
-		htlc := e.Value.(*PaymentDescriptor)
+	chanID := lnwire.NewChanIDFromOutPoint(&lc.channelState.FundingOutpoint)
 
-		if htlc.isForwarded {
+	// Determine the set of htlcs that can be forwarded as a result of
+	// having received the revocation. We will simultaneously construct the
+	// log updates and payment descriptors, allowing us to persist the log
+	// updates to disk and optimistically buffer the forwarding package in
+	// memory.
+	var (
+		addsToForward        []*PaymentDescriptor
+		addUpdates           []channeldb.LogUpdate
+		settleFailsToForward []*PaymentDescriptor
+		settleFailUpdates    []channeldb.LogUpdate
+	)
+
+	for e := lc.remoteUpdateLog.Front(); e != nil; e = e.Next() {
+		pd := e.Value.(*PaymentDescriptor)
+
+		if pd.isForwarded {
 			continue
 		}
 
-		uncomitted := (htlc.addCommitHeightRemote == 0 ||
-			htlc.addCommitHeightLocal == 0)
-		if htlc.EntryType == Add && uncomitted {
+		uncomitted := (pd.addCommitHeightRemote == 0 ||
+			pd.addCommitHeightLocal == 0)
+		if pd.EntryType == Add && uncomitted {
 			continue
 		}
 
@@ -3579,24 +3670,94 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) ([]*P
 		// locked-in at this new state. By doing this we ensure that we
 		// don't re-forward any already processed HTLC's after a
 		// restart.
-		if htlc.EntryType == Add &&
-			remoteChainTail == htlc.addCommitHeightRemote &&
-			localChainTail >= htlc.addCommitHeightLocal {
+		if pd.EntryType == Add &&
+			remoteChainTail == pd.addCommitHeightRemote &&
+			localChainTail >= pd.addCommitHeightLocal {
 
-			htlc.isForwarded = true
-			htlcsToForward = append(htlcsToForward, htlc)
+			pd.isForwarded = true
+			addsToForward = append(addsToForward, pd)
+		} else if pd.EntryType != Add &&
+			remoteChainTail >= pd.removeCommitHeightRemote &&
+			localChainTail >= pd.removeCommitHeightLocal {
+
+			pd.isForwarded = true
+			settleFailsToForward = append(settleFailsToForward, pd)
+		} else {
 			continue
 		}
 
-		if htlc.EntryType != Add &&
-			remoteChainTail >= htlc.removeCommitHeightRemote &&
-			localChainTail >= htlc.removeCommitHeightLocal {
+		// Knowing that this update is a part of this new commitment,
+		// we'll create a log update and not it's index in the log so
+		// we can later restore it properly if a restart occurs.
+		logUpdate := channeldb.LogUpdate{
+			LogIndex: pd.LogIndex,
+		}
 
-			htlc.isForwarded = true
-			htlcsToForward = append(htlcsToForward, htlc)
-			continue
+		// We'll map the type of the PaymentDescriptor to one of the
+		// four messages that it corresponds to. With this set of
+		// messages obtained, we can simply read from disk and re-send
+		// them in the case of a needed channel sync.
+		switch pd.EntryType {
+		case Add:
+			htlc := &lnwire.UpdateAddHTLC{
+				ChanID:      chanID,
+				ID:          pd.HtlcIndex,
+				Amount:      pd.Amount,
+				Expiry:      pd.Timeout,
+				PaymentHash: pd.RHash,
+			}
+			copy(htlc.OnionBlob[:], pd.OnionBlob)
+			logUpdate.UpdateMsg = htlc
+			addUpdates = append(addUpdates, logUpdate)
+
+		case Settle:
+			logUpdate.UpdateMsg = &lnwire.UpdateFufillHTLC{
+				ChanID:          chanID,
+				ID:              pd.ParentIndex,
+				PaymentPreimage: pd.RPreimage,
+			}
+			settleFailUpdates = append(settleFailUpdates, logUpdate)
+
+		case Fail:
+			logUpdate.UpdateMsg = &lnwire.UpdateFailHTLC{
+				ChanID: chanID,
+				ID:     pd.ParentIndex,
+				Reason: pd.FailReason,
+			}
+			settleFailUpdates = append(settleFailUpdates, logUpdate)
+
+		case MalformedFail:
+			logUpdate.UpdateMsg = &lnwire.UpdateFailMalformedHTLC{
+				ChanID:       chanID,
+				ID:           pd.ParentIndex,
+				ShaOnionBlob: pd.ShaOnionBlob,
+				FailureCode:  pd.FailCode,
+			}
+			settleFailUpdates = append(settleFailUpdates, logUpdate)
 		}
 	}
+
+	source := lc.channelState.ShortChanID
+	remoteHeight := lc.channelState.RemoteCommitment.CommitHeight
+
+	fwdPkg := channeldb.NewFwdPkg(source, remoteChainTail, addUpdates,
+		settleFailUpdates)
+
+	walletLog.Infof("Revoking commit height: %d", remoteHeight)
+
+	// At this point, the revocation has been accepted, and we've rotated
+	// the current revocation key+hash for the remote party. Therefore we
+	// sync now to ensure the revocation producer state is consistent with
+	// the current commitment height and also to advance the on-disk
+	// commitment chain.
+	err = lc.channelState.AdvanceCommitChainTail(fwdPkg)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	// Since they revoked the current lowest height in their commitment
+	// chain, we can advance their chain by a single commitment.
+	lc.remoteCommitChain.advanceTail()
 
 	// As we've just completed a new state transition, attempt to see if we
 	// can remove any entries from the update log which have been removed
@@ -3604,7 +3765,19 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) ([]*P
 	compactLogs(lc.localUpdateLog, lc.remoteUpdateLog,
 		localChainTail, remoteChainTail)
 
-	return htlcsToForward, nil
+	return fwdPkg, addsToForward, settleFailsToForward, nil
+}
+
+// LoadLockedInHtlcs loads any pending log updates from disk and returns the
+// payment descriptors to be processed by the link.
+func (lc *LightningChannel) LoadFwdPkgs() ([]*channeldb.FwdPkg, error) {
+	return lc.channelState.LoadFwdPkgs()
+}
+
+func (lc *LightningChannel) FilterFwdPkg(height uint64,
+	keepLocal map[uint16]struct{}) error {
+
+	return lc.channelState.FilterFwdPkg(height, keepLocal)
 }
 
 // NextRevocationKey returns the commitment point for the _next_ commitment
@@ -3730,8 +3903,8 @@ func (lc *LightningChannel) ReceiveHTLC(htlc *lnwire.UpdateAddHTLC) (uint64, err
 // creating the corresponding wire message. In the case the supplied preimage
 // is invalid, an error is returned. Additionally, the value of the settled
 // HTLC is also returned.
-func (lc *LightningChannel) SettleHTLC(preimage [32]byte, htlcIndex uint64,
-) error {
+func (lc *LightningChannel) SettleHTLC(preimage [32]byte,
+	htlcIndex uint64) error {
 
 	lc.Lock()
 	defer lc.Unlock()
@@ -3886,9 +4059,6 @@ func (lc *LightningChannel) ReceiveFailHTLC(htlcIndex uint64, reason []byte,
 // created this active channel. This outpoint is used throughout various
 // subsystems to uniquely identify an open channel.
 func (lc *LightningChannel) ChannelPoint() *wire.OutPoint {
-	lc.RLock()
-	defer lc.RUnlock()
-
 	return &lc.channelState.FundingOutpoint
 }
 
@@ -3896,9 +4066,6 @@ func (lc *LightningChannel) ChannelPoint() *wire.OutPoint {
 // ID encodes the exact location in the main chain that the original
 // funding output can be found.
 func (lc *LightningChannel) ShortChanID() lnwire.ShortChannelID {
-	lc.RLock()
-	defer lc.RUnlock()
-
 	return lc.channelState.ShortChanID
 }
 
@@ -5345,4 +5512,12 @@ func (lc *LightningChannel) ActiveHtlcs() []channeldb.HTLC {
 	}
 
 	return activeHtlcs
+}
+
+// RemoteCommitHeight returns the commitment height of the remote chain.
+func (lc *LightningChannel) RemoteCommitHeight() uint64 {
+	lc.RLock()
+	defer lc.RUnlock()
+
+	return lc.channelState.RemoteCommitment.CommitHeight
 }
