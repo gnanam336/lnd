@@ -253,7 +253,7 @@ func (s *Switch) SendHTLC(nextNode [33]byte, htlc *lnwire.UpdateAddHTLC,
 		destNode:       nextNode,
 		htlc:           htlc,
 	}
-	if err := s.forward(packet); err != nil {
+	if err := s.send(packet); err != nil {
 		s.removePendingPayment(paymentID)
 		return zeroPreimage, err
 	}
@@ -355,10 +355,7 @@ func (s *Switch) updateLinkPolicies(c *updatePoliciesCmd) error {
 	return nil
 }
 
-// forward is used in order to find next channel link and apply htlc
-// update. Also this function is used by channel links itself in order to
-// forward the update after it has been included in the channel.
-func (s *Switch) forward(packet *htlcPacket) error {
+func (s *Switch) send(packet *htlcPacket) error {
 	command := &plexPacket{
 		pkt: packet,
 		err: make(chan error, 1),
@@ -374,8 +371,30 @@ func (s *Switch) forward(packet *htlcPacket) error {
 	case err := <-command.err:
 		return err
 	case <-s.quit:
-		return errors.New("unable to forward htlc packet htlc switch was " +
-			"stopped")
+		return errors.New("unable to forward htlc packet, " +
+			"htlc switch was stopped")
+	}
+}
+
+func (s *Switch) Forward(packets ...*htlcPacket) {
+	//s.wg.Add(1)
+	go s.forward(packets...)
+}
+
+// forward is used in order to find next channel link and apply htlc
+// update. Also this function is used by channel links itself in order to
+// forward the update after it has been included in the channel.
+//
+// NOTE: All calls to forward using sync=false are assumed to have been spawned
+// as go routines, after incrementing the server's wait group.
+func (s *Switch) forward(packets ...*htlcPacket) {
+	// If the call is not synchronous, then it is assumed to have been
+	// spawned as a goroutine, so we must signal the switch's wait group
+	// upon completion.
+	//defer s.wg.Done()
+
+	for _, packet := range packets {
+		s.send(packet)
 	}
 }
 
