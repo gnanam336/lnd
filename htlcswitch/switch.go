@@ -377,7 +377,7 @@ func (s *Switch) send(packet *htlcPacket) error {
 }
 
 func (s *Switch) Forward(packets ...*htlcPacket) {
-	//s.wg.Add(1)
+	s.wg.Add(1)
 	go s.forward(packets...)
 }
 
@@ -391,7 +391,9 @@ func (s *Switch) forward(packets ...*htlcPacket) {
 	// If the call is not synchronous, then it is assumed to have been
 	// spawned as a goroutine, so we must signal the switch's wait group
 	// upon completion.
-	//defer s.wg.Done()
+	defer s.wg.Done()
+
+	// TODO(conner): write forwarding package to disk
 
 	for _, packet := range packets {
 		s.send(packet)
