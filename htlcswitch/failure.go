@@ -59,6 +59,10 @@ type ErrorEncrypter interface {
 	// in an additional layer of onion encryption. This process repeats
 	// until the error arrives at the source of the payment.
 	IntermediateEncrypt(lnwire.OpaqueReason) lnwire.OpaqueReason
+
+	Encode(io.Writer) error
+
+	Decode(io.Reader) error
 }
 
 // SphinxErrorEncrypter is a concrete implementation of both the ErrorEncrypter
@@ -67,6 +71,12 @@ type ErrorEncrypter interface {
 // encryption and must be treated as such accordingly.
 type SphinxErrorEncrypter struct {
 	*sphinx.OnionErrorEncrypter
+
+	ogPacket *sphinx.OnionPacket
+}
+
+func (s *SphinxErrorEncrypter) OnionPacket() *sphinx.OnionPacket {
+	return s.ogPacket
 }
 
 // EncryptFirstHop transforms a concrete failure message into an encrypted
