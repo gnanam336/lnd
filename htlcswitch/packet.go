@@ -5,12 +5,17 @@ import (
 	"encoding/binary"
 	"io"
 
+	"github.com/lightningnetwork/lightning-onion"
 	"github.com/lightningnetwork/lnd/lnwire"
 )
 
 // htlcPacket is a wrapper around htlc lnwire update, which adds additional
 // information which is needed by this package.
 type htlcPacket struct {
+	// fwdIndex represents the persistent forwarding index assigned by the
+	// switch.
+	fwdIndex uint64
+
 	// destNode is the first-hop destination of a local created HTLC add
 	// message.
 	destNode [33]byte
@@ -62,6 +67,11 @@ type htlcPacket struct {
 func (h *htlcPacket) Encode(w io.Writer) error {
 	var scratch [8]byte
 
+	binary.BigEndian.PutUint64(scratch[:], h.fwdIndex)
+	if _, err := w.Write(scratch[:]); err != nil {
+		return err
+	}
+
 	if _, err := w.Write(h.destNode[:]); err != nil {
 		return err
 	}
@@ -89,11 +99,25 @@ func (h *htlcPacket) Encode(w io.Writer) error {
 		return err
 	}
 
+	if err := h.obfuscator.Encode(w); err != nil {
+		return err
+	}
+
+	err := binary.Write(w, binary.BigEndian, h.isObfuscated)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
 func (h *htlcPacket) Decode(r io.Reader) error {
 	var scratch [8]byte
+
+	if _, err := r.Read(scratch[:]); err != nil {
+		return err
+	}
+	h.fwdIndex = binary.BigEndian.Uint64(scratch[:])
 
 	if _, err := r.Read(h.destNode[:]); err != nil {
 		return err
@@ -129,6 +153,18 @@ func (h *htlcPacket) Decode(r io.Reader) error {
 		return err
 	}
 	h.htlc = htlc
+
+	h.obfuscator = &SphinxErrorEncrypter{
+		OnionErrorEncrypter: &sphinx.OnionErrorEncrypter{},
+	}
+	if err := h.obfuscator.Decode(r); err != nil {
+		return err
+	}
+
+	err = binary.Read(r, binary.BigEndian, &h.isObfuscated)
+	if err != nil {
+		return err
+	}
 
 	return nil
 }
