@@ -14,6 +14,7 @@ import (
 
 	"github.com/btcsuite/fastsha256"
 	"github.com/go-errors/errors"
+	"github.com/lightningnetwork/lightning-onion"
 	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/contractcourt"
@@ -194,6 +195,10 @@ func (r *mockHopIterator) ForwardingInstructions() ForwardingInfo {
 	return h
 }
 
+func (r *mockHopIterator) OnionPacket() *sphinx.OnionPacket {
+	return nil
+}
+
 func (r *mockHopIterator) EncodeNextHop(w io.Writer) error {
 	var hopLength [4]byte
 	binary.BigEndian.PutUint32(hopLength[:], uint32(len(r.hops)))
@@ -235,7 +240,9 @@ var _ HopIterator = (*mockHopIterator)(nil)
 
 // mockObfuscator mock implementation of the failure obfuscator which only
 // encodes the failure and do not makes any onion obfuscation.
-type mockObfuscator struct{}
+type mockObfuscator struct {
+	ogPacket *sphinx.OnionPacket
+}
 
 func newMockObfuscator() ErrorEncrypter {
 	return &mockObfuscator{}
@@ -254,6 +261,18 @@ func (o *mockObfuscator) EncryptFirstHop(failure lnwire.FailureMessage) (
 func (o *mockObfuscator) IntermediateEncrypt(reason lnwire.OpaqueReason) lnwire.OpaqueReason {
 	return reason
 
+}
+
+func (o *mockObfuscator) OnionPacket() *sphinx.OnionPacket {
+	return o.ogPacket
+}
+
+func (o *mockObfuscator) Encode(w io.Writer) error {
+	return nil
+}
+
+func (o *mockObfuscator) Decode(r io.Reader) error {
+	return nil
 }
 
 // mockDeobfuscator mock implementation of the failure deobfuscator which
@@ -281,9 +300,21 @@ var _ ErrorDecrypter = (*mockDeobfuscator)(nil)
 
 // mockIteratorDecoder test version of hop iterator decoder which decodes the
 // encoded array of hops.
-type mockIteratorDecoder struct{}
+type mockIteratorDecoder struct {
+	mu sync.RWMutex
 
-func (p *mockIteratorDecoder) DecodeHopIterator(r io.Reader, meta []byte) (
+	iterators map[[32]byte][]HopIterator
+	failcodes map[[32]byte][]lnwire.FailCode
+}
+
+func newMockIteratorDecoder() *mockIteratorDecoder {
+	return &mockIteratorDecoder{
+		iterators: make(map[[32]byte][]HopIterator),
+		failcodes: make(map[[32]byte][]lnwire.FailCode),
+	}
+}
+
+func (p *mockIteratorDecoder) DecodeHopIterator(r io.Reader, rHash []byte) (
 	HopIterator, lnwire.FailCode) {
 
 	var b [4]byte
@@ -304,6 +335,47 @@ func (p *mockIteratorDecoder) DecodeHopIterator(r io.Reader, meta []byte) (
 	}
 
 	return newMockHopIterator(hops...), lnwire.CodeNone
+}
+
+func (p *mockIteratorDecoder) DecodeHopIterators(id []byte, rs []io.Reader,
+	rHashes [][]byte) ([]HopIterator, []lnwire.FailCode) {
+
+	idHash := sha256.Sum256(id)
+
+	p.mu.RLock()
+	if iters, ok := p.iterators[idHash]; ok {
+		if fcodes, ok := p.failcodes[idHash]; ok {
+			p.mu.RUnlock()
+			return iters, fcodes
+		}
+	}
+	p.mu.RUnlock()
+
+	batchSize := len(rs)
+
+	var (
+		iterators = make([]HopIterator, 0, batchSize)
+		failcodes = make([]lnwire.FailCode, 0, batchSize)
+	)
+
+	for i := range rs {
+		iterator, failcode := p.DecodeHopIterator(rs[i], rHashes[i])
+		iterators = append(iterators, iterator)
+		failcodes = append(failcodes, failcode)
+	}
+
+	p.mu.Lock()
+	if iters, ok := p.iterators[idHash]; ok {
+		if fcodes, ok := p.failcodes[idHash]; ok {
+			p.mu.Unlock()
+			return iters, fcodes
+		}
+	}
+	p.iterators[idHash] = iterators
+	p.failcodes[idHash] = failcodes
+	p.mu.Unlock()
+
+	return iterators, failcodes
 }
 
 func (f *ForwardingInfo) decode(r io.Reader) error {
@@ -516,6 +588,10 @@ func (i *mockInvoiceRegistry) SettleInvoice(rhash chainhash.Hash) error {
 	invoice, ok := i.invoices[rhash]
 	if !ok {
 		return fmt.Errorf("can't find mock invoice: %x", rhash[:])
+	}
+
+	if invoice.Terms.Settled {
+		return nil
 	}
 
 	invoice.Terms.Settled = true
