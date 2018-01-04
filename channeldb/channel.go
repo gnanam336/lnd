@@ -394,6 +394,8 @@ type OpenChannel struct {
 	// TODO(roasbeef): just need to store local and remote HTLC's?
 
 	sync.RWMutex
+
+	OperatorStore
 }
 
 // FullSync serializes, and writes to disk the *full* channel state, using
@@ -942,7 +944,7 @@ func (c *OpenChannel) AppendRemoteCommitChain(diff *CommitDiff) error {
 		fwdLogKey := fwdPackageLogBucket
 		fwdBucket := chanBucket.Bucket(fwdLogKey)
 		if fwdBucket != nil {
-			err = AckLockedInHtlcs(fwdBucket, diff.LogUpdates)
+			err = c.AckLockedInHtlcs(fwdBucket, diff.LogUpdates...)
 			if err != nil {
 				return err
 			}
@@ -1098,7 +1100,20 @@ func (c *OpenChannel) AdvanceCommitChainTail(fwdPackage []LogUpdate) error {
 			return err
 		}
 
-		if err := LockInHtlcs(fwdBucket, fwdPackage); err != nil {
+		glog.Printf("curr commit height: %v",
+			c.RemoteCommitment.CommitHeight)
+
+		/*
+			for i := range fwdPkg.Htlcs {
+				fwdPkg.Htlcs[i].RemoteFwdRef = &FwdRef{
+					Source: c.ShortChanID,
+					Height: fwdPkg.Height,
+					Index:  uint16(i),
+				}
+			}
+		*/
+
+		if err := c.LockInHtlcs(fwdBucket, fwdPackage); err != nil {
 			return err
 		}
 
@@ -1136,7 +1151,7 @@ func (c *OpenChannel) LoadLockedInHtlcs() ([]LogUpdate, error) {
 			return nil
 		}
 
-		htlcs, err := LoadLockedInHtlcs(fwdBucket)
+		htlcs, err := c.OperatorStore.LoadLockedInHtlcs(fwdBucket)
 		if err != nil {
 			return err
 		}
@@ -1149,6 +1164,12 @@ func (c *OpenChannel) LoadLockedInHtlcs() ([]LogUpdate, error) {
 	}
 
 	return lockedInHtlcs, nil
+}
+
+func (c *OpenChannel) RemoveFwdPkg(height uint64) error {
+	return c.Db.Update(func(tx *bolt.Tx) error {
+		return c.Packager.RemovePkg(tx, height)
+	})
 }
 
 // RevocationLogTail returns the "tail", or the end of the current revocation
@@ -1601,10 +1622,9 @@ func putChanInfo(chanBucket *bolt.Bucket, channel *OpenChannel) error {
 	if err := writeElements(&w,
 		channel.ChanType, channel.ChainHash, channel.FundingOutpoint,
 		channel.ShortChanID, channel.IsPending, channel.IsInitiator,
-		channel.IsBorked, channel.FundingBroadcastHeight,
-		channel.NumConfsRequired, channel.ChannelFlags,
-		channel.IdentityPub, channel.Capacity, channel.TotalMSatSent,
-		channel.TotalMSatReceived,
+		channel.FundingBroadcastHeight, channel.NumConfsRequired,
+		channel.ChannelFlags, channel.IdentityPub, channel.Capacity,
+		channel.TotalMSatSent, channel.TotalMSatReceived,
 	); err != nil {
 		return err
 	}
@@ -1702,10 +1722,9 @@ func fetchChanInfo(chanBucket *bolt.Bucket, channel *OpenChannel) error {
 	if err := readElements(r,
 		&channel.ChanType, &channel.ChainHash, &channel.FundingOutpoint,
 		&channel.ShortChanID, &channel.IsPending, &channel.IsInitiator,
-		&channel.IsBorked, &channel.FundingBroadcastHeight,
-		&channel.NumConfsRequired, &channel.ChannelFlags,
-		&channel.IdentityPub, &channel.Capacity, &channel.TotalMSatSent,
-		&channel.TotalMSatReceived,
+		&channel.FundingBroadcastHeight, &channel.NumConfsRequired,
+		&channel.ChannelFlags, &channel.IdentityPub, &channel.Capacity,
+		&channel.TotalMSatSent, &channel.TotalMSatReceived,
 	); err != nil {
 		return err
 	}
@@ -1852,9 +1871,11 @@ func appendChannelLogEntry(log *bolt.Bucket,
 	return log.Put(logEntrykey[:], b.Bytes())
 }
 
-func LockInHtlcs(bkt *bolt.Bucket, htlcs []LogUpdate) error {
+type OperatorStore struct{}
+
+func (o *OperatorStore) LockInHtlcs(bkt *bolt.Bucket, htlcs []LogUpdate) error {
 	for i := range htlcs {
-		if err := LockInHtlc(bkt, &htlcs[i]); err != nil {
+		if err := o.LockInHtlc(bkt, &htlcs[i]); err != nil {
 			return err
 		}
 	}
@@ -1862,18 +1883,18 @@ func LockInHtlcs(bkt *bolt.Bucket, htlcs []LogUpdate) error {
 	return nil
 }
 
-func LockInHtlc(bkt *bolt.Bucket, htlc *LogUpdate) error {
+func (o *OperatorStore) LockInHtlc(bkt *bolt.Bucket, htlc *LogUpdate) error {
 	logKey := makeLogKey(htlc.LogIndex)
 
 	var b bytes.Buffer
-	if err := serializeLogUpdate(&b, htlc); err != nil {
+	if err := o.serializeLogUpdate(&b, htlc); err != nil {
 		return err
 	}
 
 	return bkt.Put(logKey[:], b.Bytes())
 }
 
-func LoadLockedInHtlcs(bkt *bolt.Bucket) ([]LogUpdate, error) {
+func (o *OperatorStore) LoadLockedInHtlcs(bkt *bolt.Bucket) ([]LogUpdate, error) {
 	var htlcs []LogUpdate
 	if err := bkt.ForEach(func(k, v []byte) error {
 		if len(k) != 8 {
@@ -1883,7 +1904,7 @@ func LoadLockedInHtlcs(bkt *bolt.Bucket) ([]LogUpdate, error) {
 		index := binary.BigEndian.Uint64(k)
 
 		htlcReader := bytes.NewReader(v)
-		htlc, err := deserializeLogUpdate(htlcReader)
+		htlc, err := o.deserializeLogUpdate(htlcReader)
 		if err != nil {
 			return err
 		}
@@ -1899,9 +1920,11 @@ func LoadLockedInHtlcs(bkt *bolt.Bucket) ([]LogUpdate, error) {
 	return htlcs, nil
 }
 
-func AckLockedInHtlcs(bkt *bolt.Bucket, htlcs []LogUpdate) error {
+func (o *OperatorStore) AckLockedInHtlcs(bkt *bolt.Bucket,
+	htlcs ...LogUpdate) error {
+
 	for i := range htlcs {
-		err := AckLockedInHtlc(bkt, htlcs[i].LogIndex)
+		err := o.AckLockedInHtlc(bkt, htlcs[i].LogIndex)
 		if err != nil {
 			return err
 		}
@@ -1910,16 +1933,29 @@ func AckLockedInHtlcs(bkt *bolt.Bucket, htlcs []LogUpdate) error {
 	return nil
 }
 
-func AckLockedInHtlc(bkt *bolt.Bucket, index uint64) error {
+func (o *OperatorStore) AckLockedInHtlcIndexes(bkt *bolt.Bucket,
+	indexes ...uint64) error {
+
+	for _, index := range indexes {
+		err := o.AckLockedInHtlc(bkt, index)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (_ *OperatorStore) AckLockedInHtlc(bkt *bolt.Bucket, index uint64) error {
 	logKey := makeLogKey(index)
 	return bkt.Delete(logKey[:])
 }
 
-func serializeLogUpdate(w io.Writer, htlc *LogUpdate) error {
+func (_ *OperatorStore) serializeLogUpdate(w io.Writer, htlc *LogUpdate) error {
 	return writeElement(w, htlc.UpdateMsg)
 }
 
-func deserializeLogUpdate(r io.Reader) (LogUpdate, error) {
+func (_ *OperatorStore) deserializeLogUpdate(r io.Reader) (LogUpdate, error) {
 	var htlc LogUpdate
 	if err := readElement(r, &htlc.UpdateMsg); err != nil {
 		return LogUpdate{}, err
