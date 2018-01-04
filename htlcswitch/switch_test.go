@@ -67,7 +67,7 @@ func TestSwitchForward(t *testing.T) {
 	}
 
 	// Handle the request and checks that bob channel link received it.
-	if err := s.forward(packet); err != nil {
+	if err := s.send(packet); err != nil {
 		t.Fatal(err)
 	}
 
@@ -95,7 +95,7 @@ func TestSwitchForward(t *testing.T) {
 	}
 
 	// Handle the request and checks that payment circuit works properly.
-	if err := s.forward(packet); err != nil {
+	if err := s.send(packet); err != nil {
 		t.Fatal(err)
 	}
 
@@ -158,7 +158,7 @@ func TestSkipIneligibleLinksMultiHopForward(t *testing.T) {
 	}
 
 	// The request to forward should fail as
-	err := s.forward(packet)
+	err := s.send(packet)
 	if err == nil {
 		t.Fatalf("forwarding should have failed due to inactive link")
 	}
@@ -248,7 +248,7 @@ func TestSwitchCancel(t *testing.T) {
 	}
 
 	// Handle the request and checks that bob channel link received it.
-	if err := s.forward(request); err != nil {
+	if err := s.send(request); err != nil {
 		t.Fatal(err)
 	}
 
@@ -274,7 +274,7 @@ func TestSwitchCancel(t *testing.T) {
 	}
 
 	// Handle the request and checks that payment circuit works properly.
-	if err := s.forward(request); err != nil {
+	if err := s.send(request); err != nil {
 		t.Fatal(err)
 	}
 
@@ -330,7 +330,7 @@ func TestSwitchAddSamePayment(t *testing.T) {
 	}
 
 	// Handle the request and checks that bob channel link received it.
-	if err := s.forward(request); err != nil {
+	if err := s.send(request); err != nil {
 		t.Fatal(err)
 	}
 
@@ -357,7 +357,7 @@ func TestSwitchAddSamePayment(t *testing.T) {
 	}
 
 	// Handle the request and checks that bob channel link received it.
-	if err := s.forward(request); err != nil {
+	if err := s.send(request); err != nil {
 		t.Fatal(err)
 	}
 
@@ -376,7 +376,7 @@ func TestSwitchAddSamePayment(t *testing.T) {
 	}
 
 	// Handle the request and checks that payment circuit works properly.
-	if err := s.forward(request); err != nil {
+	if err := s.send(request); err != nil {
 		t.Fatal(err)
 	}
 
@@ -399,7 +399,7 @@ func TestSwitchAddSamePayment(t *testing.T) {
 	}
 
 	// Handle the request and checks that payment circuit works properly.
-	if err := s.forward(request); err != nil {
+	if err := s.send(request); err != nil {
 		t.Fatal(err)
 	}
 
@@ -502,7 +502,7 @@ func TestSwitchSendPayment(t *testing.T) {
 		},
 	}
 
-	if err := s.forward(packet); err != nil {
+	if err := s.send(packet); err != nil {
 		t.Fatalf("can't forward htlc packet: %v", err)
 	}
 
@@ -525,7 +525,7 @@ func TestSwitchSendPayment(t *testing.T) {
 
 	// Send second failure response and check that user were able to
 	// receive the error.
-	if err := s.forward(packet); err != nil {
+	if err := s.send(packet); err != nil {
 		t.Fatalf("can't forward htlc packet: %v", err)
 	}
 
