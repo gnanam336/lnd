@@ -60,9 +60,8 @@ type ErrorEncrypter interface {
 	// until the error arrives at the source of the payment.
 	IntermediateEncrypt(lnwire.OpaqueReason) lnwire.OpaqueReason
 
-	Encode(io.Writer) error
-
-	Decode(io.Reader) error
+	Encode(w io.Writer) error
+	Decode(r io.Reader) error
 }
 
 // SphinxErrorEncrypter is a concrete implementation of both the ErrorEncrypter
@@ -105,6 +104,14 @@ func (s *SphinxErrorEncrypter) EncryptFirstHop(failure lnwire.FailureMessage) (l
 // NOTE: Part of the ErrorEncrypter interface.
 func (s *SphinxErrorEncrypter) IntermediateEncrypt(reason lnwire.OpaqueReason) lnwire.OpaqueReason {
 	return s.EncryptError(false, reason)
+}
+
+func (s *SphinxErrorEncrypter) Encode(w io.Writer) error {
+	return nil
+}
+
+func (s *SphinxErrorEncrypter) Decode(r io.Reader) error {
+	return nil
 }
 
 // A compile time check to ensure SphinxErrorEncrypter implements the
