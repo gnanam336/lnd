@@ -459,10 +459,17 @@ func TestSimpleAddSettleWorkflow(t *testing.T) {
 	// Alice then processes this revocation, sending her own revocation for
 	// her prior commitment transaction. Alice shouldn't have any HTLCs to
 	// forward since she's sending an outgoing HTLC.
-	if htlcs, err := aliceChannel.ReceiveRevocation(bobRevocation); err != nil {
+	fwdPkg, _, err := aliceChannel.ReceiveRevocation(bobRevocation)
+	if err != nil {
 		t.Fatalf("alice unable to process bob's revocation: %v", err)
-	} else if len(htlcs) != 0 {
-		t.Fatalf("alice forwards %v htlcs, should forward none: ", len(htlcs))
+	}
+	if len(fwdPkg.Adds) != 0 {
+		t.Fatalf("alice forwards %v add htlcs, should forward none",
+			len(fwdPkg.Adds))
+	}
+	if len(fwdPkg.SettleFails) != 0 {
+		t.Fatalf("alice forwards %v settle/fail htlcs, "+
+			"should forward none", len(fwdPkg.SettleFails))
 	}
 
 	// Alice then processes bob's signature, and since she just received
@@ -483,11 +490,17 @@ func TestSimpleAddSettleWorkflow(t *testing.T) {
 	// is fully locked in within both commitment transactions. Bob should
 	// also be able to forward an HTLC now that the HTLC has been locked
 	// into both commitment transactions.
-	if htlcs, err := bobChannel.ReceiveRevocation(aliceRevocation); err != nil {
+	fwdPkg, _, err = bobChannel.ReceiveRevocation(aliceRevocation)
+	if err != nil {
 		t.Fatalf("bob unable to process alice's revocation: %v", err)
-	} else if len(htlcs) != 1 {
-		t.Fatalf("bob should be able to forward an HTLC, instead can "+
-			"forward %v", len(htlcs))
+	}
+	if len(fwdPkg.Adds) != 1 {
+		t.Fatalf("bob forwards %v add htlcs, should only forward one",
+			len(fwdPkg.Adds))
+	}
+	if len(fwdPkg.SettleFails) != 0 {
+		t.Fatalf("bob forwards %v settle/fail htlcs, "+
+			"should forward none", len(fwdPkg.SettleFails))
 	}
 
 	// At this point, both sides should have the proper number of satoshis
@@ -572,12 +585,19 @@ func TestSimpleAddSettleWorkflow(t *testing.T) {
 		t.Fatalf("alice unable to sign new commitment: %v", err)
 	}
 
-	if htlcs, err := bobChannel.ReceiveRevocation(aliceRevocation2); err != nil {
+	fwdPkg, _, err = bobChannel.ReceiveRevocation(aliceRevocation2)
+	if err != nil {
 		t.Fatalf("bob unable to process alice's revocation: %v", err)
-	} else if len(htlcs) != 0 {
-		t.Fatalf("bob shouldn't forward any HTLCs after outgoing settle, "+
-			"instead can forward: %v", spew.Sdump(htlcs))
 	}
+	if len(fwdPkg.Adds) != 0 {
+		t.Fatalf("bob forwards %v add htlcs, should forward none",
+			len(fwdPkg.Adds))
+	}
+	if len(fwdPkg.SettleFails) != 0 {
+		t.Fatalf("bob forwards %v settle/fail htlcs, "+
+			"should forward none", len(fwdPkg.SettleFails))
+	}
+
 	err = bobChannel.ReceiveNewCommitment(aliceSig2, aliceHtlcSigs2)
 	if err != nil {
 		t.Fatalf("bob unable to process alice's new commitment: %v", err)
@@ -587,14 +607,20 @@ func TestSimpleAddSettleWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bob unable to revoke commitment: %v", err)
 	}
-
-	if htlcs, err := aliceChannel.ReceiveRevocation(bobRevocation2); err != nil {
+	fwdPkg, _, err = aliceChannel.ReceiveRevocation(bobRevocation2)
+	if err != nil {
 		t.Fatalf("alice unable to process bob's revocation: %v", err)
-	} else if len(htlcs) != 1 {
+	}
+	if len(fwdPkg.Adds) != 0 {
 		// Alice should now be able to forward the settlement HTLC to
 		// any down stream peers.
-		t.Fatalf("alice should be able to forward a single HTLC, "+
-			"instead can forward %v: %v", len(htlcs), spew.Sdump(htlcs))
+		t.Fatalf("alice should be forwarding an add HTLC, "+
+			"instead forwarding %v: %v", len(fwdPkg.Adds),
+			spew.Sdump(fwdPkg.Adds))
+	}
+	if len(fwdPkg.SettleFails) != 1 {
+		t.Fatalf("alice should be forwarding one settle/fails HTLC, "+
+			"instead forwarding: %v", len(fwdPkg.SettleFails))
 	}
 
 	// At this point, Bob should have 6 BTC settled, with Alice still having
@@ -4020,7 +4046,7 @@ func TestLockedInHtlcForwardingSkipAfterRestart(t *testing.T) {
 	}
 
 	// Alice should detect that she doesn't need to forward any HTLC's.
-	aliceHtlcsToForward, err := aliceChannel.ReceiveRevocation(
+	_, aliceHtlcsToForward, err := aliceChannel.ReceiveRevocation(
 		bobRevocation,
 	)
 	if err != nil {
@@ -4042,7 +4068,7 @@ func TestLockedInHtlcForwardingSkipAfterRestart(t *testing.T) {
 
 	// Bob on the other hand, should detect that he now has 2 incoming
 	// HTLC's that he can forward along.
-	bobHtlcsToForward, err := bobChannel.ReceiveRevocation(aliceRevocation)
+	_, bobHtlcsToForward, err := bobChannel.ReceiveRevocation(aliceRevocation)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4095,7 +4121,7 @@ func TestLockedInHtlcForwardingSkipAfterRestart(t *testing.T) {
 	// At this point, Bob receives the revocation from Alice, which is now
 	// his signal to examine all the HTLC's that have been locked in to
 	// process.
-	bobHtlcsToForward, err = bobChannel.ReceiveRevocation(aliceRevocation)
+	_, bobHtlcsToForward, err = bobChannel.ReceiveRevocation(aliceRevocation)
 	if err != nil {
 		t.Fatal(err)
 	}
