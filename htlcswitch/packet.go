@@ -1,7 +1,6 @@
 package htlcswitch
 
 import (
-	"crypto/sha256"
 	"encoding/binary"
 	"io"
 
@@ -76,16 +75,24 @@ func (h *htlcPacket) Encode(w io.Writer) error {
 		return err
 	}
 
-	if _, err := w.Write(h.payHash[:]); err != nil {
-		return err
-	}
-
-	binary.BigEndian.PutUint64(scratch[:], h.dest.ToUint64())
+	inChanID := h.incomingChanID.ToUint64()
+	binary.BigEndian.PutUint64(scratch[:], inChanID)
 	if _, err := w.Write(scratch[:]); err != nil {
 		return err
 	}
 
-	binary.BigEndian.PutUint64(scratch[:], h.src.ToUint64())
+	outChanID := h.outgoingChanID.ToUint64()
+	binary.BigEndian.PutUint64(scratch[:], outChanID)
+	if _, err := w.Write(scratch[:]); err != nil {
+		return err
+	}
+
+	binary.BigEndian.PutUint64(scratch[:], h.incomingHTLCID)
+	if _, err := w.Write(scratch[:]); err != nil {
+		return err
+	}
+
+	binary.BigEndian.PutUint64(scratch[:], h.outgoingHTLCID)
 	if _, err := w.Write(scratch[:]); err != nil {
 		return err
 	}
@@ -103,7 +110,12 @@ func (h *htlcPacket) Encode(w io.Writer) error {
 		return err
 	}
 
-	err := binary.Write(w, binary.BigEndian, h.isObfuscated)
+	err := binary.Write(w, binary.BigEndian, h.localFailure)
+	if err != nil {
+		return err
+	}
+
+	err = binary.Write(w, binary.BigEndian, h.isRouted)
 	if err != nil {
 		return err
 	}
@@ -123,23 +135,29 @@ func (h *htlcPacket) Decode(r io.Reader) error {
 		return err
 	}
 
-	if _, err := r.Read(h.payHash[:]); err != nil {
-		return err
-	}
-
 	if _, err := r.Read(scratch[:]); err != nil {
 		return err
 	}
-	h.dest = lnwire.NewShortChanIDFromInt(
+	h.incomingChanID = lnwire.NewShortChanIDFromInt(
 		binary.BigEndian.Uint64(scratch[:]),
 	)
 
 	if _, err := r.Read(scratch[:]); err != nil {
 		return err
 	}
-	h.src = lnwire.NewShortChanIDFromInt(
+	h.outgoingChanID = lnwire.NewShortChanIDFromInt(
 		binary.BigEndian.Uint64(scratch[:]),
 	)
+
+	if _, err := r.Read(scratch[:]); err != nil {
+		return err
+	}
+	h.incomingHTLCID = binary.BigEndian.Uint64(scratch[:])
+
+	if _, err := r.Read(scratch[:]); err != nil {
+		return err
+	}
+	h.outgoingHTLCID = binary.BigEndian.Uint64(scratch[:])
 
 	if _, err := r.Read(scratch[:]); err != nil {
 		return err
@@ -161,7 +179,12 @@ func (h *htlcPacket) Decode(r io.Reader) error {
 		return err
 	}
 
-	err = binary.Read(r, binary.BigEndian, &h.isObfuscated)
+	err = binary.Read(r, binary.BigEndian, &h.localFailure)
+	if err != nil {
+		return err
+	}
+
+	err = binary.Read(r, binary.BigEndian, &h.isRouted)
 	if err != nil {
 		return err
 	}
