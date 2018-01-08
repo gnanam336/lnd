@@ -840,6 +840,19 @@ type LogUpdate struct {
 	UpdateMsg lnwire.Message
 }
 
+func (l *LogUpdate) Encode(w io.Writer) error {
+	return writeElement(w, l.UpdateMsg)
+}
+
+func (l *LogUpdate) Decode(r io.Reader) error {
+	var htlc LogUpdate
+	if err := readElement(r, &l.UpdateMsg); err != nil {
+		return LogUpdate{}, err
+	}
+
+	return htlc, nil
+}
+
 // CommitDiff represents the delta needed to apply the state transition between
 // two subsequent commitment states. Given state N and state N+1, one is able
 // to apply the set of messages contained within the CommitDiff to N to arrive
@@ -1951,7 +1964,7 @@ func (_ *OperatorStore) AckLockedInHtlc(bkt *bolt.Bucket, index uint64) error {
 	return bkt.Delete(logKey[:])
 }
 
-func (_ *OperatorStore) serializeLogUpdate(w io.Writer, htlc *LogUpdate) error {
+func SerializeLogUpdate(w io.Writer, htlc *LogUpdate) error {
 	return writeElement(w, htlc.UpdateMsg)
 }
 
