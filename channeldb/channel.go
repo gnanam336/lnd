@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	glog "log"
 	"net"
 	"sync"
 
@@ -387,6 +388,8 @@ type OpenChannel struct {
 	// implementation of secret store is shachain store.
 	RevocationStore shachain.Store
 
+	Packager
+
 	// TODO(roasbeef): eww
 	Db *DB
 
@@ -394,7 +397,7 @@ type OpenChannel struct {
 
 	sync.RWMutex
 
-	OperatorStore
+	//OperatorStore
 }
 
 // FullSync serializes, and writes to disk the *full* channel state, using
@@ -837,19 +840,18 @@ type LogUpdate struct {
 	// update which will be used when restoring our local update log if
 	// we're left with a dangling update on restart.
 	UpdateMsg lnwire.Message
+
+	// RemoteFwdRef indicates the location of the log update held on disk
+	// after receiving a remote revocation.
+	RemoteFwdRef *FwdRef
 }
 
 func (l *LogUpdate) Encode(w io.Writer) error {
-	return writeElement(w, l.UpdateMsg)
+	return writeElements(w, l.LogIndex, l.UpdateMsg)
 }
 
 func (l *LogUpdate) Decode(r io.Reader) error {
-	var htlc LogUpdate
-	if err := readElement(r, &l.UpdateMsg); err != nil {
-		return LogUpdate{}, err
-	}
-
-	return htlc, nil
+	return readElements(r, &l.LogIndex, &l.UpdateMsg)
 }
 
 // CommitDiff represents the delta needed to apply the state transition between
@@ -953,14 +955,14 @@ func (c *OpenChannel) AppendRemoteCommitChain(diff *CommitDiff) error {
 			return err
 		}
 
-		fwdLogKey := fwdPackageLogBucket
-		fwdBucket := chanBucket.Bucket(fwdLogKey)
-		if fwdBucket != nil {
-			err = c.AckLockedInHtlcs(fwdBucket, diff.LogUpdates...)
-			if err != nil {
-				return err
+		/*
+			for _, htlc := range diff.LogUpdates {
+				err = c.RemoveHtlc(tx, htlc.RemoteFwdRef)
+				if err != nil {
+					return err
+				}
 			}
-		}
+		*/
 
 		// TODO(roasbeef): use seqno to derive key for later LCP
 
@@ -1046,7 +1048,7 @@ func (c *OpenChannel) InsertNextRevocation(revKey *btcec.PublicKey) error {
 // rectify the situation. This method will add the current commitment for the
 // remote party to the revocation log, and promote the current pending
 // commitment to the current remove commitment.
-func (c *OpenChannel) AdvanceCommitChainTail(fwdPackage []LogUpdate) error {
+func (c *OpenChannel) AdvanceCommitChainTail(fwdPkg *FwdPkg) error {
 
 	c.Lock()
 	defer c.Unlock()
@@ -1105,31 +1107,25 @@ func (c *OpenChannel) AdvanceCommitChainTail(fwdPackage []LogUpdate) error {
 		if err != nil {
 			return err
 		}
-
-		fwdLogKey := fwdPackageLogBucket
-		fwdBucket, err := chanBucket.CreateBucketIfNotExists(fwdLogKey)
-		if err != nil {
-			return err
-		}
-
 		glog.Printf("curr commit height: %v",
 			c.RemoteCommitment.CommitHeight)
 
-		/*
-			for i := range fwdPkg.Htlcs {
-				fwdPkg.Htlcs[i].RemoteFwdRef = &FwdRef{
-					Source: c.ShortChanID,
-					Height: fwdPkg.Height,
-					Index:  uint16(i),
-				}
+		for i := range fwdPkg.Htlcs {
+			fwdPkg.Htlcs[i].RemoteFwdRef = &FwdRef{
+				Source: c.ShortChanID,
+				Height: fwdPkg.Height,
+				Index:  uint16(i),
 			}
-		*/
+		}
 
-		if err := c.LockInHtlcs(fwdBucket, fwdPackage); err != nil {
+		if err := c.AddFwdPkg(tx, fwdPkg); err != nil {
 			return err
 		}
 
 		newRemoteCommit = &newCommit.Commitment
+
+		glog.Printf("new commit height: %v", newRemoteCommit.CommitHeight)
+
 		return nil
 	})
 	if err != nil {
@@ -1147,35 +1143,25 @@ func (c *OpenChannel) AdvanceCommitChainTail(fwdPackage []LogUpdate) error {
 // LoadLockedInHtlcs scans the forwarding log for any packages that haven't been
 // processed, and returns their deserialized log updates in map indexed by the
 // remote commitment height at which the updates were locked in.
-func (c *OpenChannel) LoadLockedInHtlcs() ([]LogUpdate, error) {
-	var lockedInHtlcs []LogUpdate
+func (c *OpenChannel) LoadFwdPkgs() ([]*FwdPkg, error) {
+	var fwdPkgs []*FwdPkg
 	if err := c.Db.View(func(tx *bolt.Tx) error {
-
-		chanBucket, err := readChanBucket(tx, c.IdentityPub,
-			&c.FundingOutpoint, c.ChainHash)
-		if err != nil {
-			return err
-		}
-
-		fwdLogKey := fwdPackageLogBucket
-		fwdBucket := chanBucket.Bucket(fwdLogKey)
-		if fwdBucket == nil {
-			return nil
-		}
-
-		htlcs, err := c.OperatorStore.LoadLockedInHtlcs(fwdBucket)
-		if err != nil {
-			return err
-		}
-
-		lockedInHtlcs = htlcs
-
-		return nil
+		var err error
+		fwdPkgs, err = c.Packager.LoadFwdPkgs(tx)
+		return err
 	}); err != nil {
 		return nil, err
 	}
 
-	return lockedInHtlcs, nil
+	return fwdPkgs, nil
+}
+
+func (c *OpenChannel) FilterFwdPkg(height uint64,
+	keepLocal map[uint16]struct{}) error {
+
+	return c.Db.Update(func(tx *bolt.Tx) error {
+		return c.Packager.FilterFwdPkg(tx, height, keepLocal)
+	})
 }
 
 func (c *OpenChannel) RemoveFwdPkg(height uint64) error {
@@ -1899,7 +1885,7 @@ func (o *OperatorStore) LockInHtlc(bkt *bolt.Bucket, htlc *LogUpdate) error {
 	logKey := makeLogKey(htlc.LogIndex)
 
 	var b bytes.Buffer
-	if err := o.serializeLogUpdate(&b, htlc); err != nil {
+	if err := SerializeLogUpdate(&b, htlc); err != nil {
 		return err
 	}
 
