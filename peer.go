@@ -381,6 +381,7 @@ func (p *peer) loadActiveChannels(chans []*channeldb.OpenChannel) error {
 		linkCfg := htlcswitch.ChannelLinkConfig{
 			Peer:                  p,
 			DecodeHopIterator:     p.server.sphinx.DecodeHopIterator,
+			DecodeHopIterators:    p.server.sphinx.DecodeHopIterators,
 			DecodeOnionObfuscator: p.server.sphinx.ExtractErrorEncrypter,
 			GetLastChannelUpdate: createGetLastUpdate(p.server.chanRouter,
 				p.PubKey(), lnChan.ShortChanID()),
@@ -1274,6 +1275,7 @@ out:
 			linkConfig := htlcswitch.ChannelLinkConfig{
 				Peer:                  p,
 				DecodeHopIterator:     p.server.sphinx.DecodeHopIterator,
+				DecodeHopIterators:    p.server.sphinx.DecodeHopIterators,
 				DecodeOnionObfuscator: p.server.sphinx.ExtractErrorEncrypter,
 				GetLastChannelUpdate: createGetLastUpdate(p.server.chanRouter,
 					p.PubKey(), newChanReq.channel.ShortChanID()),
