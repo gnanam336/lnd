@@ -9,12 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"io"
-
 	"math"
 
 	"github.com/davecgh/go-spew/spew"
 	"github.com/go-errors/errors"
+	"github.com/lightningnetwork/lightning-onion"
 	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/contractcourt"
@@ -174,7 +173,7 @@ func createInterceptorFunc(prefix, receiver string, messages []expectedMessage,
 // TestChannelLinkSingleHopPayment in this test we checks the interaction
 // between Alice and Bob within scope of one channel.
 func TestChannelLinkSingleHopPayment(t *testing.T) {
-	t.Parallel()
+	//t.Parallel()
 
 	channels, cleanUp, _, err := createClusterChannels(
 		btcutil.SatoshiPerBitcoin*3,
@@ -254,7 +253,7 @@ func TestChannelLinkSingleHopPayment(t *testing.T) {
 // link to cope with bigger number of payment updates that commitment
 // transaction may consist.
 func TestChannelLinkBidirectionalOneHopPayments(t *testing.T) {
-	t.Parallel()
+	//t.Parallel()
 
 	channels, cleanUp, _, err := createClusterChannels(
 		btcutil.SatoshiPerBitcoin*3,
@@ -386,7 +385,7 @@ func TestChannelLinkBidirectionalOneHopPayments(t *testing.T) {
 // (Carol -> Bob -> Alice) and checking that HTLC was settled properly and
 // balances were changed in two channels.
 func TestChannelLinkMultiHopPayment(t *testing.T) {
-	t.Parallel()
+	//t.Parallel()
 
 	channels, cleanUp, _, err := createClusterChannels(
 		btcutil.SatoshiPerBitcoin*3,
@@ -493,7 +492,7 @@ func TestChannelLinkMultiHopPayment(t *testing.T) {
 // doesn't match the expected payment value, then the HTLC will be rejected
 // with the appropriate error.
 func TestExitNodeTimelockPayloadMismatch(t *testing.T) {
-	t.Parallel()
+	//t.Parallel()
 
 	channels, cleanUp, _, err := createClusterChannels(
 		btcutil.SatoshiPerBitcoin*5,
@@ -545,7 +544,7 @@ func TestExitNodeTimelockPayloadMismatch(t *testing.T) {
 // HTLC doesn't match the expected payment value, then the HTLC will be
 // rejected.
 func TestExitNodeAmountPayloadMismatch(t *testing.T) {
-	t.Parallel()
+	//t.Parallel()
 
 	channels, cleanUp, _, err := createClusterChannels(
 		btcutil.SatoshiPerBitcoin*5,
@@ -589,7 +588,7 @@ func TestExitNodeAmountPayloadMismatch(t *testing.T) {
 // intermediate node in a multi-hop payment, and receives an HTLC which
 // violates its specified multi-hop policy, then the HTLC is rejected.
 func TestLinkForwardTimelockPolicyMismatch(t *testing.T) {
-	t.Parallel()
+	//t.Parallel()
 
 	channels, cleanUp, _, err := createClusterChannels(
 		btcutil.SatoshiPerBitcoin*5,
@@ -644,7 +643,7 @@ func TestLinkForwardTimelockPolicyMismatch(t *testing.T) {
 // intermediate node in a multi-hop payment and receives an HTLC that violates
 // its current fee policy, then the HTLC is rejected with the proper error.
 func TestLinkForwardFeePolicyMismatch(t *testing.T) {
-	t.Parallel()
+	//t.Parallel()
 
 	channels, cleanUp, _, err := createClusterChannels(
 		btcutil.SatoshiPerBitcoin*3,
@@ -700,7 +699,7 @@ func TestLinkForwardFeePolicyMismatch(t *testing.T) {
 // node and receives an HTLC which is _below_ its min HTLC policy, then the
 // HTLC will be rejected.
 func TestLinkForwardMinHTLCPolicyMismatch(t *testing.T) {
-	t.Parallel()
+	//t.Parallel()
 
 	channels, cleanUp, _, err := createClusterChannels(
 		btcutil.SatoshiPerBitcoin*5,
@@ -757,7 +756,7 @@ func TestLinkForwardMinHTLCPolicyMismatch(t *testing.T) {
 // specified policy, assert that it succeeds, update the policy (to invalidate
 // the prior HTLC), and then ensure that the HTLC is rejected.
 func TestUpdateForwardingPolicy(t *testing.T) {
-	t.Parallel()
+	//t.Parallel()
 
 	channels, cleanUp, _, err := createClusterChannels(
 		btcutil.SatoshiPerBitcoin*5,
@@ -858,7 +857,7 @@ func TestUpdateForwardingPolicy(t *testing.T) {
 // bob<->alice channel has insufficient BTC capacity/bandwidth. In this test we
 // send the payment from Carol to Alice over Bob peer. (Carol -> Bob -> Alice)
 func TestChannelLinkMultiHopInsufficientPayment(t *testing.T) {
-	t.Parallel()
+	//t.Parallel()
 
 	channels, cleanUp, _, err := createClusterChannels(
 		btcutil.SatoshiPerBitcoin*3,
@@ -943,7 +942,7 @@ func TestChannelLinkMultiHopInsufficientPayment(t *testing.T) {
 // TestChannelLinkMultiHopUnknownPaymentHash checks that we receive remote error
 // from Alice if she received not suitable payment hash for htlc.
 func TestChannelLinkMultiHopUnknownPaymentHash(t *testing.T) {
-	t.Parallel()
+	//t.Parallel()
 
 	channels, cleanUp, _, err := createClusterChannels(
 		btcutil.SatoshiPerBitcoin*5,
@@ -1032,7 +1031,7 @@ func TestChannelLinkMultiHopUnknownPaymentHash(t *testing.T) {
 // has no idea about next hop (hop might goes down and routing info not updated
 // yet).
 func TestChannelLinkMultiHopUnknownNextHop(t *testing.T) {
-	t.Parallel()
+	//t.Parallel()
 
 	channels, cleanUp, _, err := createClusterChannels(
 		btcutil.SatoshiPerBitcoin*5,
@@ -1107,7 +1106,7 @@ func TestChannelLinkMultiHopUnknownNextHop(t *testing.T) {
 // TestChannelLinkMultiHopDecodeError checks that we send HTLC cancel if
 // decoding of onion blob failed.
 func TestChannelLinkMultiHopDecodeError(t *testing.T) {
-	t.Parallel()
+	//t.Parallel()
 
 	channels, cleanUp, _, err := createClusterChannels(
 		btcutil.SatoshiPerBitcoin*3,
@@ -1126,7 +1125,7 @@ func TestChannelLinkMultiHopDecodeError(t *testing.T) {
 
 	// Replace decode function with another which throws an error.
 	n.carolChannelLink.cfg.DecodeOnionObfuscator = func(
-		r io.Reader) (ErrorEncrypter, lnwire.FailCode) {
+		*sphinx.OnionPacket) (ErrorEncrypter, lnwire.FailCode) {
 		return nil, lnwire.CodeInvalidOnionVersion
 	}
 
@@ -1196,7 +1195,7 @@ func TestChannelLinkMultiHopDecodeError(t *testing.T) {
 // with an expiry that is already expired, or too close to the current block
 // height, then it will cancel the HTLC.
 func TestChannelLinkExpiryTooSoonExitNode(t *testing.T) {
-	t.Parallel()
+	//t.Parallel()
 
 	// The starting height for this test will be 200. So we'll base all
 	// HTLC starting points off of that.
@@ -1253,7 +1252,7 @@ func TestChannelLinkExpiryTooSoonExitNode(t *testing.T) {
 // and the time lock is too early for an intermediate node, then they cancel
 // the HTLC back to the sender.
 func TestChannelLinkExpiryTooSoonMidNode(t *testing.T) {
-	t.Parallel()
+	//t.Parallel()
 
 	// The starting height for this test will be 200. So we'll base all
 	// HTLC starting points off of that.
@@ -1310,7 +1309,7 @@ func TestChannelLinkExpiryTooSoonMidNode(t *testing.T) {
 // flying around between Alice and Bob are correct when Bob sends payments to
 // Alice.
 func TestChannelLinkSingleHopMessageOrdering(t *testing.T) {
-	t.Parallel()
+	//t.Parallel()
 
 	channels, cleanUp, _, err := createClusterChannels(
 		btcutil.SatoshiPerBitcoin*3,
@@ -1452,11 +1451,13 @@ func newSingleLinkTestHarness(chanAmt btcutil.Amount) (ChannelLink, func(), erro
 	}
 
 	aliceCfg := ChannelLinkConfig{
-		FwrdingPolicy:     globalPolicy,
-		Peer:              &alicePeer,
-		Switch:            New(Config{}),
-		DecodeHopIterator: decoder.DecodeHopIterator,
-		DecodeOnionObfuscator: func(io.Reader) (ErrorEncrypter, lnwire.FailCode) {
+		FwrdingPolicy:      globalPolicy,
+		Peer:               &alicePeer,
+		Switch:             New(Config{}),
+		DecodeHopIterator:  decoder.DecodeHopIterator,
+		DecodeHopIterators: decoder.DecodeHopIterators,
+		DecodeOnionObfuscator: func(*sphinx.OnionPacket) (
+			ErrorEncrypter, lnwire.FailCode) {
 			return obfuscator, lnwire.CodeNone
 		},
 		GetLastChannelUpdate: mockGetChanUpdateMessage,
@@ -1501,7 +1502,7 @@ func assertLinkBandwidth(t *testing.T, link ChannelLink,
 // TODO(roasbeef): add sync hook into packet processing so can eliminate all
 // sleep in this test and the one below
 func TestChannelLinkBandwidthConsistency(t *testing.T) {
-	t.Parallel()
+	//t.Parallel()
 
 	// TODO(roasbeef): replace manual bit twiddling with concept of
 	// resource cost for packets?
@@ -1641,7 +1642,7 @@ func TestChannelLinkBandwidthConsistency(t *testing.T) {
 // commitment overflow (no more space for new HTLC's), the bandwidth is updated
 // properly as items are being added and removed from the overflow queue.
 func TestChannelLinkBandwidthConsistencyOverflow(t *testing.T) {
-	t.Parallel()
+	//t.Parallel()
 
 	var mockBlob [lnwire.OnionPacketSize]byte
 
@@ -1768,7 +1769,7 @@ func TestChannelLinkBandwidthConsistencyOverflow(t *testing.T) {
 // TestChannelRetransmission tests the ability of the channel links to
 // synchronize theirs states after abrupt disconnect.
 func TestChannelRetransmission(t *testing.T) {
-	t.Parallel()
+	//t.Parallel()
 
 	retransmissionTests := []struct {
 		name     string
@@ -2135,7 +2136,7 @@ func TestShouldAdjustCommitFee(t *testing.T) {
 // TestChannelLinkUpdateCommitFee tests that when a new block comes in, the
 // channel link properly checks to see if it should update the commitment fee.
 func TestChannelLinkUpdateCommitFee(t *testing.T) {
-	t.Parallel()
+	//t.Parallel()
 
 	// First, we'll create our traditional three hop network. We'll only be
 	// interacting with and asserting the state of two of the end points
@@ -2277,11 +2278,11 @@ func TestChannelLinkUpdateCommitFee(t *testing.T) {
 	}
 }
 
-// TestChannelLinkRejectDuplicatePayment tests that if a link receives an
-// incoming HTLC for a payment we have already settled, then it rejects the
-// HTLC. We do this as we want to enforce the fact that invoices are only to be
-// used _once.
-func TestChannelLinkRejectDuplicatePayment(t *testing.T) {
+// TestChannelLinkAcceptDuplicatePayment tests that if a link receives an
+// incoming HTLC for a payment we have already settled, then it accepts the
+// HTLC. We do this to simplify the processing of settles after restarts or
+// failures, reducing ambiguity when a batch is only partially processed.
+func TestChannelLinkAcceptDuplicatePayment(t *testing.T) {
 	t.Parallel()
 
 	// First, we'll create our traditional three hop network. We'll only be
@@ -2334,8 +2335,8 @@ func TestChannelLinkRejectDuplicatePayment(t *testing.T) {
 	// as it's a duplicate request.
 	_, err = n.aliceServer.htlcSwitch.SendHTLC(n.bobServer.PubKey(), htlc,
 		newMockDeobfuscator())
-	if err.Error() != lnwire.CodeUnknownPaymentHash.String() {
-		t.Fatal("error haven't been received")
+	if err != nil {
+		t.Fatal("error shouldn't have been received got: %v", err)
 	}
 }
 
