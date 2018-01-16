@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"io/ioutil"
 	"sync"
 	"testing"
 	"time"
@@ -114,10 +115,33 @@ type mockServer struct {
 
 var _ Peer = (*mockServer)(nil)
 
-func newMockServer(t testing.TB, name string) *mockServer {
+func initSwitchWithDB(db *channeldb.DB) (*Switch, error) {
+	if db == nil {
+		tempPath, err := ioutil.TempDir("", "switchdb")
+		if err != nil {
+			return nil, err
+		}
+
+		db, err = channeldb.Open(tempPath)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return New(Config{
+		DB: db,
+	})
+}
+
+func newMockServer(t testing.TB, name string, db *channeldb.DB) (*mockServer, error) {
 	var id [33]byte
 	h := sha256.Sum256([]byte(name))
 	copy(id[:], h[:])
+
+	htlcSwitch, err := initSwitchWithDB(db)
+	if err != nil {
+		return nil, err
+	}
 
 	return &mockServer{
 		t:                t,
@@ -126,9 +150,9 @@ func newMockServer(t testing.TB, name string) *mockServer {
 		messages:         make(chan lnwire.Message, 3000),
 		quit:             make(chan struct{}),
 		registry:         newMockRegistry(),
-		htlcSwitch:       New(Config{}),
+		htlcSwitch:       htlcSwitch,
 		interceptorFuncs: make([]messageInterceptor, 0),
-	}
+	}, nil
 }
 
 func (s *mockServer) Start() error {
@@ -245,7 +269,8 @@ type mockObfuscator struct {
 	ogPacket *sphinx.OnionPacket
 }
 
-func newMockObfuscator() ErrorEncrypter {
+// NewMockObfuscator initializes a dummy mockObfuscator used for testing.
+func NewMockObfuscator() ErrorEncrypter {
 	return &mockObfuscator{}
 }
 
@@ -266,6 +291,10 @@ func (o *mockObfuscator) IntermediateEncrypt(reason lnwire.OpaqueReason) lnwire.
 
 func (o *mockObfuscator) OnionPacket() *sphinx.OnionPacket {
 	return o.ogPacket
+}
+
+func (o *mockObfuscator) Type() EncrypterType {
+	return EncrypterTypeMock
 }
 
 func (o *mockObfuscator) Encode(w io.Writer) error {
@@ -508,6 +537,30 @@ type mockChannelLink struct {
 	htlcID uint64
 }
 
+// completeCircuit is a helper method for adding the finalized payment circuit
+// to the switch's circuit map. In testing, this should be executed after
+// receiving an htlc from the downstream packets channel.
+func (f *mockChannelLink) completeCircuit(pkt *htlcPacket) error {
+	switch htlc := pkt.htlc.(type) {
+	case *lnwire.UpdateAddHTLC:
+		pkt.outgoingChanID = f.shortChanID
+		pkt.outgoingHTLCID = f.htlcID
+		htlc.ID = f.htlcID
+
+		if err := f.htlcSwitch.setKeystone(pkt.inKey(), pkt.outKey()); err != nil {
+			return err
+		}
+
+		f.htlcID++
+	}
+
+	return nil
+}
+
+func (f *mockChannelLink) deleteCircuit(pkt *htlcPacket) error {
+	return f.htlcSwitch.deleteCircuit(pkt.inKey())
+}
+
 func newMockChannelLink(htlcSwitch *Switch, chanID lnwire.ChannelID,
 	shortChanID lnwire.ShortChannelID, peer Peer, eligible bool,
 ) *mockChannelLink {
@@ -522,21 +575,9 @@ func newMockChannelLink(htlcSwitch *Switch, chanID lnwire.ChannelID,
 	}
 }
 
-func (f *mockChannelLink) HandleSwitchPacket(packet *htlcPacket) {
-	switch htlc := packet.htlc.(type) {
-	case *lnwire.UpdateAddHTLC:
-		f.htlcSwitch.addCircuit(&PaymentCircuit{
-			PaymentHash:    htlc.PaymentHash,
-			IncomingChanID: packet.incomingChanID,
-			IncomingHTLCID: packet.incomingHTLCID,
-			OutgoingChanID: f.shortChanID,
-			OutgoingHTLCID: f.htlcID,
-			ErrorEncrypter: packet.obfuscator,
-		})
-		f.htlcID++
-	}
-
-	f.packets <- packet
+func (f *mockChannelLink) HandleSwitchPacket(pkt *htlcPacket) error {
+	f.packets <- pkt
+	return nil
 }
 
 func (f *mockChannelLink) HandleChannelUpdate(lnwire.Message) {
