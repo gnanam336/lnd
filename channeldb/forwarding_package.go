@@ -2,6 +2,9 @@ package channeldb
 
 import (
 	"bytes"
+	"encoding/binary"
+	"fmt"
+	"io"
 
 	"github.com/boltdb/bolt"
 	"github.com/go-errors/errors"
@@ -13,60 +16,204 @@ type FwdState byte
 const (
 	FwdStateLockedIn FwdState = iota
 	FwdStateProcessed
+	FwdStateCompleted
 )
 
 var (
-	fwdSourceKey    = []byte("fwd-source")
-	htlcBucketKey   = []byte("htlcs")
-	rejectedAddsKey = []byte("rejected-adds")
+	fwdPackagesKey      = []byte("fwd-packages")
+	addBucketKey        = []byte("add-updates")
+	failSettleBucketKey = []byte("fail-settle-updates")
+	forwardedAddsKey    = []byte("forwarded-adds")
+	ackFilterKey        = []byte("ack-filter-key")
 )
 
+type PkgFilter struct {
+	nels   uint16
+	filter []byte
+}
+
+func NewPkgFilter(nels int) *PkgFilter {
+	filterLen := (nels + 7) / 8
+
+	return &PkgFilter{
+		nels:   uint16(nels),
+		filter: make([]byte, filterLen),
+	}
+}
+
+func (f *PkgFilter) Set(i uint16) {
+	byt := i / 8
+	bit := i % 8
+
+	// Set the i-th bit in the filter.
+	f.filter[byt] = f.filter[byt] | byte(1<<(7-bit))
+}
+
+func (f *PkgFilter) Contains(i uint16) bool {
+	byt := i / 8
+	bit := i % 8
+
+	shiftedBit := (f.filter[byt] >> (7 - bit)) & 0x01
+
+	return shiftedBit == 0x01
+}
+
+func (f *PkgFilter) IsFull() bool {
+	rem := f.nels % 8
+	for i, b := range f.filter {
+		if i < len(f.filter)-1 || rem == 0 {
+			if b != 0xFF {
+				return false
+			}
+		}
+
+		for j := uint16(0); j < rem; j++ {
+			shiftedBit := (b >> (7 - j)) & 0x01
+			if shiftedBit != 0x01 {
+				return false
+			}
+
+		}
+	}
+
+	return true
+}
+
+func (f *PkgFilter) Encode(w io.Writer) error {
+	if err := binary.Write(w, binary.BigEndian, f.nels); err != nil {
+		return err
+	}
+
+	_, err := w.Write(f.filter)
+
+	return err
+}
+
+func (f *PkgFilter) Decode(r io.Reader) error {
+	if err := binary.Read(r, binary.BigEndian, &f.nels); err != nil {
+		return err
+	}
+
+	filterLen := (f.nels + 7) / 8
+	f.filter = make([]byte, filterLen)
+
+	_, err := r.Read(f.filter)
+
+	return err
+}
+
 type FwdPkg struct {
-	SeqNum       uint64
-	Source       lnwire.ShortChannelID
-	State        FwdState
-	Htlcs        []LogUpdate
-	RejectedAdds map[uint16]struct{}
+	Source lnwire.ShortChannelID
+	Height uint64
+
+	State         FwdState
+	Adds          []LogUpdate
+	ForwardedAdds map[uint16]struct{}
+	AckFilter     *PkgFilter
+
+	SettleFails []LogUpdate
+}
+
+func NewFwdPkg(source lnwire.ShortChannelID, height uint64,
+	addUpdates, failSettleUpdates []LogUpdate) *FwdPkg {
+
+	return &FwdPkg{
+		Source:      source,
+		Height:      height,
+		State:       FwdStateLockedIn,
+		Adds:        addUpdates,
+		SettleFails: failSettleUpdates,
+		AckFilter:   NewPkgFilter(len(addUpdates)),
+	}
+}
+
+func (f *FwdPkg) ID() []byte {
+	var id = make([]byte, 16)
+	byteOrder.PutUint64(id[:8], f.Source.ToUint64())
+	byteOrder.PutUint64(id[8:], f.Height)
+	return id
+}
+
+func (f *FwdPkg) String() string {
+	return fmt.Sprintf("%T(src=%v, height=%v, nadds=%v, nfailsettles=%v)",
+		f, f.Source, f.Height, len(f.Adds), len(f.SettleFails))
 }
 
 type FwdRef struct {
-	SeqNum uint64
+	Source lnwire.ShortChannelID
+	Height uint64
 	Index  uint16
 }
 
-type Packager interface {
-	AddFwdPkg(*bolt.Bucket, *FwdPkg) error
-	LoadFwdPkg(*bolt.Bucket, uint64) (*FwdPkg, error)
-	FilterPkg(*bolt.Bucket, uint64, []uint16) error
-	RemoveHtlc(*bolt.Bucket, FwdRef) error
-	RemovePkg(*bolt.Bucket, uint64) error
+type FwdPackager interface {
+	AddFwdPkg(*bolt.Tx, *FwdPkg) error
+	LoadFwdPkg(*bolt.Tx, uint64) (*FwdPkg, error)
+	LoadFwdPkgs(*bolt.Tx) ([]*FwdPkg, error)
+	FilterFwdPkg(*bolt.Tx, uint64, map[uint16]struct{}) error
+	RemoveHtlc(*bolt.Tx, *FwdRef) error
+	RemovePkg(*bolt.Tx, uint64) error
 }
 
-type packager struct{}
-
-func NewPackager() *packager {
-	return &packager{}
+type Packager struct {
+	source lnwire.ShortChannelID
 }
 
-func (packager) AddFwdPkg(bkt *bolt.Bucket, fwdPkg *FwdPkg) error {
-	seqNumKey := makeLogKey(fwdPkg.SeqNum)
-	fwdPkgBkt, err := bkt.CreateBucketIfNotExists(seqNumKey[:])
+func NewPackager(source lnwire.ShortChannelID) *Packager {
+	return &Packager{
+		source: source,
+	}
+}
+
+func (*Packager) AddFwdPkg(tx *bolt.Tx, fwdPkg *FwdPkg) error {
+	fwdPkgBkt, err := tx.CreateBucketIfNotExists(fwdPackagesKey)
 	if err != nil {
 		return err
 	}
 
 	source := makeLogKey(fwdPkg.Source.ToUint64())
-	if err := fwdPkgBkt.Put(fwdSourceKey, source[:]); err != nil {
-		return err
-	}
-
-	htlcBkt, err := fwdPkgBkt.CreateBucketIfNotExists(htlcBucketKey)
+	sourceBkt, err := fwdPkgBkt.CreateBucketIfNotExists(source[:])
 	if err != nil {
 		return err
 	}
 
-	for i := range fwdPkg.Htlcs {
-		err = putLogUpdate(htlcBkt, uint16(i), &fwdPkg.Htlcs[i])
+	heightKey := makeLogKey(fwdPkg.Height)
+	heightBkt, err := sourceBkt.CreateBucketIfNotExists(heightKey[:])
+	if err != nil {
+		return err
+	}
+
+	// Write ADD updates we received at this commit height.
+	addBkt, err := heightBkt.CreateBucketIfNotExists(addBucketKey)
+	if err != nil {
+		return err
+	}
+
+	for i := range fwdPkg.Adds {
+		err = putLogUpdate(addBkt, uint16(i), &fwdPkg.Adds[i])
+		if err != nil {
+			return err
+		}
+	}
+
+	// Persist the initialized pkg filter, which will be used to determine
+	// when we can remove this forwarding package from disk.
+	var ackFilterBuf bytes.Buffer
+	if err := fwdPkg.AckFilter.Encode(&ackFilterBuf); err != nil {
+		return err
+	}
+
+	if err := heightBkt.Put(ackFilterKey, ackFilterBuf.Bytes()); err != nil {
+		return err
+	}
+
+	// Write SETTLE/FAIL updates we received at this commit height.
+	failSettleBkt, err := heightBkt.CreateBucketIfNotExists(failSettleBucketKey)
+	if err != nil {
+		return err
+	}
+
+	for i := range fwdPkg.SettleFails {
+		err = putLogUpdate(failSettleBkt, uint16(i), &fwdPkg.SettleFails[i])
 		if err != nil {
 			return err
 		}
@@ -75,43 +222,132 @@ func (packager) AddFwdPkg(bkt *bolt.Bucket, fwdPkg *FwdPkg) error {
 	return nil
 }
 
-func (packager) LoadFwdPkg(bkt *bolt.Bucket, seqNum uint64) (*FwdPkg, error) {
-	seqNumKey := makeLogKey(seqNum)
-	fwdPkgBkt := bkt.Bucket(seqNumKey[:])
+func (p *Packager) LoadFwdPkg(tx *bolt.Tx, height uint64) (*FwdPkg, error) {
+	fwdPkgBkt := tx.Bucket(fwdPackagesKey)
 	if fwdPkgBkt == nil {
-		// TODO(conner) return bkt not found
 		return nil, nil
 	}
 
-	fwdPkg := &FwdPkg{}
+	return p.loadFwdPkg(fwdPkgBkt, height)
+}
 
-	sourceBytes := fwdPkgBkt.Get(fwdSourceKey)
-	if sourceBytes == nil {
-		// TODO(conner) return invalid fwd pkg
+func (p *Packager) loadFwdPkg(fwdPkgBkt *bolt.Bucket, height uint64) (*FwdPkg, error) {
+	sourceKey := makeLogKey(p.source.ToUint64())
+	sourceBkt := fwdPkgBkt.Bucket(sourceKey[:])
+	if sourceBkt == nil {
 		return nil, nil
 	}
-	sourceUint64 := byteOrder.Uint64(sourceBytes)
-	fwdPkg.Source = lnwire.NewShortChanIDFromInt(sourceUint64)
 
-	htlcBkt := fwdPkgBkt.Bucket(htlcBucketKey)
-	if htlcBkt != nil {
-		htlcs, err := loadHtlcs(htlcBkt)
-		if err != nil {
-			return nil, err
+	heightKey := makeLogKey(height)
+	heightBkt := sourceBkt.Bucket(heightKey[:])
+	if heightBkt == nil {
+		return nil, nil
+	}
+
+	// Load ADDs from disk.
+	addBkt := heightBkt.Bucket(addBucketKey)
+	if addBkt == nil {
+		return nil, nil
+	}
+
+	adds, err := loadHtlcs(addBkt)
+	if err != nil {
+		return nil, err
+	}
+
+	// Load ack filter from disk.
+	ackFilterBytes := heightBkt.Get(ackFilterKey)
+	if ackFilterBytes == nil {
+		return nil, ErrCorruptedFwdPkg
+	}
+	ackFilterReader := bytes.NewReader(ackFilterBytes)
+
+	ackFilter := &PkgFilter{}
+	if err := ackFilter.Decode(ackFilterReader); err != nil {
+		return nil, err
+	}
+
+	// Load SETTLE/FAILs from disk.
+	failSettleBkt := heightBkt.Bucket(failSettleBucketKey)
+	if failSettleBkt == nil {
+		return nil, nil
+	}
+
+	failSettles, err := loadHtlcs(failSettleBkt)
+	if err != nil {
+		return nil, err
+	}
+
+	fwdPkg := &FwdPkg{
+		Source:      p.source,
+		Height:      height,
+		Adds:        adds,
+		SettleFails: failSettles,
+		AckFilter:   ackFilter,
+	}
+
+	/*
+		for i := range htlcs {
+			htlcs[i].RemoteFwdRef = &FwdRef{
+				Source: p.source,
+				Height: height,
+				Index:  uint16(i),
+			}
 		}
-		fwdPkg.Htlcs = htlcs
-	}
+	*/
 
-	rejectedAddBytes := fwdPkgBkt.Get(rejectedAddsKey)
-	if rejectedAddBytes == nil {
+	forwardedAddsBytes := heightBkt.Get(forwardedAddsKey)
+	if forwardedAddsBytes == nil {
 		fwdPkg.State = FwdStateLockedIn
-		fwdPkg.RejectedAdds = make(map[uint16]struct{})
+		fwdPkg.ForwardedAdds = make(map[uint16]struct{})
 	} else {
 		fwdPkg.State = FwdStateProcessed
-		fwdPkg.RejectedAdds = bytesToUint16Set(rejectedAddBytes)
+		fwdPkg.ForwardedAdds = bytesToUint16Set(forwardedAddsBytes)
+	}
+
+	if fwdPkg.AckFilter.IsFull() {
+		fwdPkg.State = FwdStateCompleted
 	}
 
 	return fwdPkg, nil
+}
+
+func (p *Packager) LoadFwdPkgs(tx *bolt.Tx) ([]*FwdPkg, error) {
+	fwdPkgBkt := tx.Bucket(fwdPackagesKey)
+	if fwdPkgBkt == nil {
+		return nil, nil
+	}
+
+	sourceKey := makeLogKey(p.source.ToUint64())
+	sourceBkt := fwdPkgBkt.Bucket(sourceKey[:])
+	if sourceBkt == nil {
+		return nil, nil
+	}
+
+	var heights []uint64
+	if err := sourceBkt.ForEach(func(k, _ []byte) error {
+		if len(k) != 8 {
+			return nil
+		}
+
+		heights = append(heights, byteOrder.Uint64(k))
+
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	var fwdPkgs []*FwdPkg
+	for _, height := range heights {
+		fwdPkg, err := p.loadFwdPkg(fwdPkgBkt, height)
+		if err != nil {
+			return nil, err
+		}
+
+		fwdPkgs = append(fwdPkgs, fwdPkg)
+	}
+
+	return fwdPkgs, nil
 }
 
 func loadHtlcs(bkt *bolt.Bucket) ([]LogUpdate, error) {
@@ -132,64 +368,126 @@ func loadHtlcs(bkt *bolt.Bucket) ([]LogUpdate, error) {
 	return htlcs, nil
 }
 
-func (packager) FilterPkg(bkt *bolt.Bucket, seqNum uint64,
-	rejectedAdds []uint16) error {
+func (p *Packager) FilterFwdPkg(tx *bolt.Tx, height uint64,
+	forwardedAdds map[uint16]struct{}) error {
 
-	seqNumKey := makeLogKey(seqNum)
-	fwdPkgBkt := bkt.Bucket(seqNumKey[:])
+	fwdPkgBkt := tx.Bucket(fwdPackagesKey)
 	if fwdPkgBkt == nil {
-		// TODO(conner) return bkt not found
 		return nil
 	}
 
-	rejectedAddsBytes := uint16sToBytes(rejectedAdds)
+	source := makeLogKey(p.source.ToUint64())
+	sourceBkt := fwdPkgBkt.Bucket(source[:])
+	if sourceBkt == nil {
+		return nil
+	}
 
-	return fwdPkgBkt.Put(rejectedAddsKey, rejectedAddsBytes)
+	heightKey := makeLogKey(height)
+	heightBkt := sourceBkt.Bucket(heightKey[:])
+	if heightBkt == nil {
+		return nil
+	}
+
+	forwardedAddsBytes := heightBkt.Get(forwardedAddsKey)
+	if forwardedAddsBytes != nil {
+		return nil
+	}
+
+	forwardedAddsBytes = uint16SetToBytes(forwardedAdds)
+
+	return heightBkt.Put(forwardedAddsKey, forwardedAddsBytes)
 }
 
-func (packager) RemoveHtlc(bkt *bolt.Bucket, ref FwdRef) error {
-	seqNumKey := makeLogKey(ref.SeqNum)
-	fwdPkgBkt := bkt.Bucket(seqNumKey[:])
-	if fwdPkgBkt == nil {
-		// TODO(conner) return bkt not found
-		return nil
-	}
+func (*Packager) RemoveHtlc(tx *bolt.Tx, ref *FwdRef) error {
+	/*
+		if ref == nil {
+			return nil
+		}
 
-	htlcBkt, err := fwdPkgBkt.CreateBucketIfNotExists(htlcBucketKey)
-	if err != nil {
-		return err
-	}
+		fwdPkgBkt := tx.Bucket(fwdPackagesKey)
+		if fwdPkgBkt == nil {
+			return nil
+		}
 
-	logIdxKey := uint16Key(ref.Index)
-	if err := htlcBkt.Delete(logIdxKey); err != nil {
-		return err
-	}
+		source := makeLogKey(ref.Source.ToUint64())
+		sourceBkt := fwdPkgBkt.Bucket(source[:])
+		if sourceBkt == nil {
+			return nil
+		}
 
-	if err := isBucketEmpty(htlcBkt); err != nil {
-		return nil
-	}
+		heightKey := makeLogKey(ref.Height)
+		heightBkt := sourceBkt.Bucket(heightKey[:])
+		if heightBkt == nil {
+			return nil
+		}
 
-	return fwdPkgBkt.Delete(htlcBucketKey)
+		htlcBkt := heightBkt.Bucket(htlcBucketKey)
+		if htlcBkt == nil {
+			return nil
+		}
+
+		logIdxKey := uint16Key(ref.Index)
+		if err := htlcBkt.Delete(logIdxKey); err != nil {
+			return err
+		}
+
+		if err := isBucketEmpty(htlcBkt); err != nil {
+			return nil
+		}
+
+		return fwdPkgBkt.Delete(htlcBucketKey)
+	*/
+
+	return nil
 }
 
-func (packager) RemovePkg(bkt *bolt.Bucket, pkgIdx uint64) error {
-	pkgIdxKey := makeLogKey(pkgIdx)
-	fwdPkgBkt := bkt.Bucket(pkgIdxKey[:])
-	if fwdPkgBkt == nil {
-		// TODO(conner) return bkt not found
-		return nil
-	}
+func (p *Packager) RemovePkg(tx *bolt.Tx, height uint64) error {
 
-	htlcBkt := fwdPkgBkt.Bucket(htlcBucketKey)
-	if htlcBkt == nil {
-		return nil
-	}
+	/*
+		fwdPkgBkt := tx.Bucket(fwdPackagesKey)
+		if fwdPkgBkt == nil {
+			return nil
+		}
 
-	if err := isBucketEmpty(htlcBkt); err != nil {
-		return ErrFwdPkgNotEmpty
-	}
+		sourceBytes := makeLogKey(p.source.ToUint64())
+		sourceBkt := fwdPkgBkt.Bucket(sourceBytes[:])
+		if sourceBkt == nil {
+			return nil
+		}
 
-	return bkt.Delete(pkgIdxKey[:])
+		heightKey := makeLogKey(height)
+		heightBkt := sourceBkt.Bucket(heightKey[:])
+		if heightBkt == nil {
+			return nil
+		}
+
+		htlcBkt := heightBkt.Bucket(htlcBucketKey)
+		if htlcBkt == nil {
+			return nil
+		}
+
+		if err := isBucketEmpty(htlcBkt); err != nil {
+			return ErrFwdPkgNotEmpty
+		}
+
+		if err := sourceBkt.Delete(heightKey[:]); err != nil {
+			return err
+		}
+
+		err := isBucketEmpty(sourceBkt)
+		switch err {
+		case nil:
+			// fallthrough
+		case errBucketNotEmpty:
+			return nil
+		default:
+			return err
+		}
+
+		return fwdPkgBkt.Delete(sourceBytes[:])
+	*/
+
+	return nil
 }
 
 func putLogUpdate(bkt *bolt.Bucket, idx uint16, htlc *LogUpdate) error {
@@ -202,8 +500,9 @@ func putLogUpdate(bkt *bolt.Bucket, idx uint16, htlc *LogUpdate) error {
 }
 
 var (
-	errBucketNotEmpty = errors.New("bucket is not empty")
-	ErrFwdPkgNotEmpty = errors.New("fwding package is not empty")
+	errBucketNotEmpty  = errors.New("bucket is not empty")
+	ErrFwdPkgNotEmpty  = errors.New("fwding package is not empty")
+	ErrCorruptedFwdPkg = errors.New("fwding package has invalid on-disk structure")
 )
 
 func isBucketEmpty(bkt *bolt.Bucket) error {
@@ -224,12 +523,14 @@ func uint16FromKey(key []byte) uint16 {
 	return byteOrder.Uint16(key)
 }
 
-// uint16sToBytes serializes a slice of uint16s into a slice of bytes.
-func uint16sToBytes(u16s []uint16) []byte {
+// uint16SetToBytes serializes a slice of uint16s into a slice of bytes.
+func uint16SetToBytes(u16s map[uint16]struct{}) []byte {
 	var bs = make([]byte, 2*len(u16s))
-	for i, b := range u16s {
-		bs[2*i] = byte(b >> 8)
-		bs[2*i+1] = byte(b)
+	var i int
+	for b := range u16s {
+		bs[i] = byte(b >> 8)
+		bs[i+1] = byte(b)
+		i += 2
 	}
 
 	return bs
@@ -250,4 +551,4 @@ func bytesToUint16Set(bs []byte) map[uint16]struct{} {
 
 // Compile-time constraint to ensure that packager implements the public
 // Packager interface.
-var _ Packager = (*packager)(nil)
+var _ FwdPackager = (*Packager)(nil)
