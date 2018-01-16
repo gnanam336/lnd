@@ -85,19 +85,39 @@ type HopIterator interface {
 	// EncodeNextHop encodes the onion packet destined for the next hop
 	// into the passed io.Writer.
 	EncodeNextHop(w io.Writer) error
+
+	// OnionPacket returns the original onion packet used to generate the
+	// secret keys for this instance.
+	OnionPacket() *sphinx.OnionPacket
 }
 
 // sphinxHopIterator is the Sphinx implementation of hop iterator which uses
 // onion routing to encode the payment route  in such a way so that node might
 // see only the next hop in the route..
 type sphinxHopIterator struct {
-	// nextPacket is the decoded onion packet for the _next_ hop.
-	nextPacket *sphinx.OnionPacket
+	// ogPacket is the original packet from which the processed packet is
+	// derived.
+	ogPacket *sphinx.OnionPacket
 
 	// processedPacket is the outcome of processing an onion packet. It
 	// includes the information required to properly forward the packet to
 	// the next hop.
 	processedPacket *sphinx.ProcessedPacket
+
+	// nextPacket is the decoded onion packet for the _next_ hop.
+	nextPacket *sphinx.OnionPacket
+}
+
+// makeSphinxHopIterator converts a processed packet returned from a sphinx
+// router and converts it into an hop iterator for usage in the link.
+func makeSphinxHopIterator(ogPacket *sphinx.OnionPacket,
+	packet *sphinx.ProcessedPacket) *sphinxHopIterator {
+
+	return &sphinxHopIterator{
+		ogPacket:        ogPacket,
+		processedPacket: packet,
+		nextPacket:      packet.NextPacket,
+	}
 }
 
 // A compile time check to ensure sphinxHopIterator implements the HopIterator
@@ -137,6 +157,10 @@ func (r *sphinxHopIterator) ForwardingInstructions() ForwardingInfo {
 	}
 }
 
+func (r *sphinxHopIterator) OnionPacket() *sphinx.OnionPacket {
+	return r.ogPacket
+}
+
 // OnionProcessor is responsible for keeping all sphinx dependent parts inside
 // and expose only decoding function. With such approach we give freedom for
 // subsystems which wants to decode sphinx path to not be dependable from
@@ -153,6 +177,15 @@ type OnionProcessor struct {
 // NewOnionProcessor creates new instance of decoder.
 func NewOnionProcessor(router *sphinx.Router) *OnionProcessor {
 	return &OnionProcessor{router}
+}
+
+func (p *OnionProcessor) Start() error {
+	return p.router.Start()
+}
+
+func (p *OnionProcessor) Stop() error {
+	p.router.Stop()
+	return nil
 }
 
 // DecodeHopIterator attempts to decode a valid sphinx packet from the passed io.Reader
@@ -194,10 +227,117 @@ func (p *OnionProcessor) DecodeHopIterator(r io.Reader, rHash []byte) (HopIterat
 		}
 	}
 
-	return &sphinxHopIterator{
-		nextPacket:      sphinxPacket.NextPacket,
-		processedPacket: sphinxPacket,
-	}, lnwire.CodeNone
+	return makeSphinxHopIterator(onionPkt, sphinxPacket), lnwire.CodeNone
+}
+
+func (p *OnionProcessor) DecodeHopIterators(id []byte, rs []io.Reader,
+	rHashes [][]byte) ([]HopIterator, []lnwire.FailCode) {
+
+	batchSize := len(rs)
+
+	var (
+		onionPkts = make([]sphinx.OnionPacket, batchSize)
+		iterators = make([]HopIterator, batchSize)
+		failcodes = make([]lnwire.FailCode, batchSize)
+	)
+
+	tx := p.router.BeginTxn(id, batchSize)
+
+	for i, r := range rs {
+		onionPkt := &onionPkts[i]
+		err := onionPkt.Decode(r)
+		switch err {
+		case nil:
+			// success
+
+		case sphinx.ErrInvalidOnionVersion:
+			failcodes[i] = lnwire.CodeInvalidOnionVersion
+			continue
+
+		case sphinx.ErrInvalidOnionKey:
+			failcodes[i] = lnwire.CodeInvalidOnionKey
+			continue
+
+		default:
+			log.Errorf("unable to decode onion packet: %v", err)
+			failcodes[i] = lnwire.CodeTemporaryChannelFailure
+			continue
+		}
+
+		err = tx.ProcessOnionPacket(uint16(i), onionPkt, rHashes[i])
+		switch err {
+		case nil:
+			// success
+
+		case sphinx.ErrInvalidOnionVersion:
+			failcodes[i] = lnwire.CodeInvalidOnionVersion
+			continue
+
+		case sphinx.ErrInvalidOnionHMAC:
+			failcodes[i] = lnwire.CodeInvalidOnionHmac
+			continue
+
+		case sphinx.ErrInvalidOnionKey:
+			failcodes[i] = lnwire.CodeInvalidOnionKey
+			continue
+
+		default:
+			log.Errorf("unable to process onion packet: %v", err)
+			failcodes[i] = lnwire.CodeTemporaryChannelFailure
+			continue
+		}
+	}
+
+	// With that batch created, we will now attempt to write the shared
+	// secrets to disk. This operation will returns the set of indices that
+	// were detected as replays, and the computed sphinx packets for all
+	// indices that did not fail the above loop. Only indices that are not
+	// in the replay set should be considered valid, as they are
+	// opportunistically computed.
+	packets, replays, err := tx.Commit()
+	if err != nil {
+		// If we failed to commit the batch to the secret share log, we
+		// will mark all not-yet-failed channels with a temporary
+		// channel failure and exit since we cannot proceed.
+		for i, fcode := range failcodes {
+			// Skip any indexes that already failed onion decoding.
+			if fcode != lnwire.CodeNone {
+				continue
+			}
+
+			log.Errorf("unable to process onion packet: %v", err)
+			failcodes[i] = lnwire.CodeTemporaryChannelFailure
+		}
+
+		return iterators, failcodes
+	}
+
+	// Otherwise, the commit was successful. Now we will post process any
+	// remaining packets, additionally failing any that were included in the
+	// replay set.
+	for i, fcode := range failcodes {
+		// Skip any indexes that already failed onion decoding.
+		if fcode != lnwire.CodeNone {
+			continue
+		}
+
+		// If this index is contained in the replay set, mark it with a
+		// temporary channel failure error code. We infer that the
+		// offending error was due to a replayed packet because this
+		// index was found in the replay set.
+		if replays.Contains(uint16(i)) {
+			log.Errorf("unable to process onion packet: %v",
+				sphinx.ErrReplayedPacket)
+			failcodes[i] = lnwire.CodeTemporaryChannelFailure
+			continue
+		}
+
+		// Finally, construct a hop iterator from our processed sphinx
+		// packet, simultaneously caching the original onion packet.
+		iterators[i] = makeSphinxHopIterator(&onionPkts[i], &packets[i])
+	}
+
+	return iterators, failcodes
 }
 
 // ExtractErrorEncrypter takes an io.Reader which should contain the onion
@@ -205,20 +345,8 @@ func (p *OnionProcessor) DecodeHopIterator(r io.Reader, rHash []byte) (HopIterat
 // ErrorEncrypter instance using the derived shared secret. In the case that en
 // error occurs, a lnwire failure code detailing the parsing failure will be
 // returned.
-func (p *OnionProcessor) ExtractErrorEncrypter(r io.Reader) (ErrorEncrypter, lnwire.FailCode) {
-
-	onionPkt := &sphinx.OnionPacket{}
-	if err := onionPkt.Decode(r); err != nil {
-		switch err {
-		case sphinx.ErrInvalidOnionVersion:
-			return nil, lnwire.CodeInvalidOnionVersion
-		case sphinx.ErrInvalidOnionKey:
-			return nil, lnwire.CodeInvalidOnionKey
-		default:
-			log.Errorf("unable to decode onion packet: %v", err)
-			return nil, lnwire.CodeInvalidOnionKey
-		}
-	}
+func (p *OnionProcessor) ExtractErrorEncrypter(onionPkt *sphinx.OnionPacket) (
+	ErrorEncrypter, lnwire.FailCode) {
 
 	onionObfuscator, err := sphinx.NewOnionErrorEncrypter(p.router,
 		onionPkt.EphemeralKey)
@@ -238,5 +366,6 @@ func (p *OnionProcessor) ExtractErrorEncrypter(r io.Reader) (ErrorEncrypter, lnw
 
 	return &SphinxErrorEncrypter{
 		OnionErrorEncrypter: onionObfuscator,
+		ogPacket:            onionPkt,
 	}, lnwire.CodeNone
 }
