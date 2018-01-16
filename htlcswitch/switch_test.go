@@ -2,7 +2,11 @@ package htlcswitch
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
+	"io"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,19 +17,40 @@ import (
 	"github.com/roasbeef/btcd/wire"
 )
 
-var (
-	hash1, _ = chainhash.NewHash(bytes.Repeat([]byte("a"), 32))
-	hash2, _ = chainhash.NewHash(bytes.Repeat([]byte("b"), 32))
+var idSeqNum uint64
 
-	chanPoint1 = wire.NewOutPoint(hash1, 0)
-	chanPoint2 = wire.NewOutPoint(hash2, 0)
+func genIDs() (lnwire.ChannelID, lnwire.ChannelID, lnwire.ShortChannelID,
+	lnwire.ShortChannelID) {
 
-	chanID1 = lnwire.NewChanIDFromOutPoint(chanPoint1)
-	chanID2 = lnwire.NewChanIDFromOutPoint(chanPoint2)
+	id := atomic.AddUint64(&idSeqNum, 2)
 
-	aliceChanID = lnwire.NewShortChanIDFromInt(1)
-	bobChanID   = lnwire.NewShortChanIDFromInt(2)
-)
+	var scratch [8]byte
+
+	binary.BigEndian.PutUint64(scratch[:], id)
+	hash1, _ := chainhash.NewHash(bytes.Repeat(scratch[:], 4))
+
+	binary.BigEndian.PutUint64(scratch[:], id+1)
+	hash2, _ := chainhash.NewHash(bytes.Repeat(scratch[:], 4))
+
+	chanPoint1 := wire.NewOutPoint(hash1, uint32(id))
+	chanPoint2 := wire.NewOutPoint(hash2, uint32(id+1))
+
+	chanID1 := lnwire.NewChanIDFromOutPoint(chanPoint1)
+	chanID2 := lnwire.NewChanIDFromOutPoint(chanPoint2)
+
+	aliceChanID := lnwire.NewShortChanIDFromInt(id)
+	bobChanID := lnwire.NewShortChanIDFromInt(id + 1)
+
+	return chanID1, chanID2, aliceChanID, bobChanID
+}
+
+func genPreimage() ([32]byte, error) {
+	var preimage [32]byte
+	if _, err := io.ReadFull(rand.Reader, preimage[:]); err != nil {
+		return preimage, err
+	}
+	return preimage, nil
+}
 
 // TestSwitchForward checks the ability of htlc switch to forward add/settle
 // requests.
@@ -37,6 +62,8 @@ func TestSwitchForward(t *testing.T) {
 
 	s := New(Config{})
 	s.Start()
+
+	chanID1, chanID2, aliceChanID, bobChanID := genIDs()
 
 	aliceChannelLink := newMockChannelLink(
 		s, chanID1, aliceChanID, alicePeer, true,
@@ -53,7 +80,10 @@ func TestSwitchForward(t *testing.T) {
 
 	// Create request which should be forwarded from Alice channel link to
 	// bob channel link.
-	preimage := [sha256.Size]byte{1}
+	preimage, err := genPreimage()
+	if err != nil {
+		t.Fatalf("unable to generate preimage: %v", err)
+	}
 	rhash := fastsha256.Sum256(preimage[:])
 	packet := &htlcPacket{
 		incomingChanID: aliceChannelLink.ShortChanID(),
@@ -125,6 +155,8 @@ func TestSkipIneligibleLinksMultiHopForward(t *testing.T) {
 	s := New(Config{})
 	s.Start()
 
+	chanID1, chanID2, aliceChanID, bobChanID := genIDs()
+
 	aliceChannelLink := newMockChannelLink(
 		s, chanID1, aliceChanID, alicePeer, true,
 	)
@@ -171,7 +203,7 @@ func TestSkipIneligibleLinksMultiHopForward(t *testing.T) {
 // TestSkipIneligibleLinksLocalForward ensures that the switch will not attempt
 // to forward any HTLC's down a link that isn't yet eligible for forwarding.
 func TestSkipIneligibleLinksLocalForward(t *testing.T) {
-	t.Parallel()
+	// t.Parallel()
 
 	// We'll create a single link for this test, marking it as being unable
 	// to forward form the get go.
@@ -180,6 +212,8 @@ func TestSkipIneligibleLinksLocalForward(t *testing.T) {
 	s := New(Config{})
 	s.Start()
 
+	chanID1, _, aliceChanID, _ := genIDs()
+
 	aliceChannelLink := newMockChannelLink(
 		s, chanID1, aliceChanID, alicePeer, false,
 	)
@@ -187,7 +221,10 @@ func TestSkipIneligibleLinksLocalForward(t *testing.T) {
 		t.Fatalf("unable to add alice link: %v", err)
 	}
 
-	preimage := [sha256.Size]byte{1}
+	preimage, err := genPreimage()
+	if err != nil {
+		t.Fatalf("unable to generate preimage: %v", err)
+	}
 	rhash := fastsha256.Sum256(preimage[:])
 	addMsg := &lnwire.UpdateAddHTLC{
 		PaymentHash: rhash,
@@ -198,7 +235,7 @@ func TestSkipIneligibleLinksLocalForward(t *testing.T) {
 	// outgoing link. This should fail as Alice isn't yet able to forward
 	// any active HTLC's.
 	alicePub := aliceChannelLink.Peer().PubKey()
-	_, err := s.SendHTLC(alicePub, addMsg, nil)
+	_, err = s.SendHTLC(alicePub, addMsg, nil)
 	if err == nil {
 		t.Fatalf("local forward should fail due to inactive link")
 	}
@@ -219,6 +256,8 @@ func TestSwitchCancel(t *testing.T) {
 	s := New(Config{})
 	s.Start()
 
+	chanID1, chanID2, aliceChanID, bobChanID := genIDs()
+
 	aliceChannelLink := newMockChannelLink(
 		s, chanID1, aliceChanID, alicePeer, true,
 	)
@@ -234,7 +273,10 @@ func TestSwitchCancel(t *testing.T) {
 
 	// Create request which should be forwarder from alice channel link
 	// to bob channel link.
-	preimage := [sha256.Size]byte{1}
+	preimage, err := genPreimage()
+	if err != nil {
+		t.Fatalf("unable to generate preimage: %v", err)
+	}
 	rhash := fastsha256.Sum256(preimage[:])
 	request := &htlcPacket{
 		incomingChanID: aliceChannelLink.ShortChanID(),
@@ -295,6 +337,8 @@ func TestSwitchCancel(t *testing.T) {
 func TestSwitchAddSamePayment(t *testing.T) {
 	t.Parallel()
 
+	chanID1, chanID2, aliceChanID, bobChanID := genIDs()
+
 	alicePeer := newMockServer(t, "alice")
 	bobPeer := newMockServer(t, "bob")
 
@@ -316,7 +360,10 @@ func TestSwitchAddSamePayment(t *testing.T) {
 
 	// Create request which should be forwarder from alice channel link
 	// to bob channel link.
-	preimage := [sha256.Size]byte{1}
+	preimage, err := genPreimage()
+	if err != nil {
+		t.Fatalf("unable to generate preimage: %v", err)
+	}
 	rhash := fastsha256.Sum256(preimage[:])
 	request := &htlcPacket{
 		incomingChanID: aliceChannelLink.ShortChanID(),
@@ -425,6 +472,8 @@ func TestSwitchSendPayment(t *testing.T) {
 	s := New(Config{})
 	s.Start()
 
+	chanID1, _, aliceChanID, _ := genIDs()
+
 	aliceChannelLink := newMockChannelLink(
 		s, chanID1, aliceChanID, alicePeer, true,
 	)
@@ -434,7 +483,10 @@ func TestSwitchSendPayment(t *testing.T) {
 
 	// Create request which should be forwarder from alice channel link
 	// to bob channel link.
-	preimage := [sha256.Size]byte{1}
+	preimage, err := genPreimage()
+	if err != nil {
+		t.Fatalf("unable to generate preimage: %v", err)
+	}
 	rhash := fastsha256.Sum256(preimage[:])
 	update := &lnwire.UpdateAddHTLC{
 		PaymentHash: rhash,
