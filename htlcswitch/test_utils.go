@@ -11,14 +11,13 @@ import (
 	"io/ioutil"
 	"os"
 
-	"io"
-
 	"math/big"
 
 	"net"
 
 	"github.com/btcsuite/fastsha256"
 	"github.com/go-errors/errors"
+	"github.com/lightningnetwork/lightning-onion"
 	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/contractcourt"
@@ -664,8 +663,7 @@ type clusterChannels struct {
 func createClusterChannels(aliceToBob, bobToCarol btcutil.Amount) (
 	*clusterChannels, func(), func() (*clusterChannels, error), error) {
 
-	firstChanID := lnwire.NewShortChanIDFromInt(4)
-	secondChanID := lnwire.NewShortChanIDFromInt(5)
+	_, _, firstChanID, secondChanID := genIDs()
 
 	// Create lightning channels between Alice<->Bob and Bob<->Carol
 	aliceChannel, firstBobChannel, cleanAliceBob, restoreAliceBob, err :=
@@ -741,7 +739,7 @@ func newThreeHopNetwork(t testing.TB, aliceChannel, firstBobChannel,
 
 	// Create mock decoder instead of sphinx one in order to mock the route
 	// which htlc should follow.
-	decoder := &mockIteratorDecoder{}
+	decoder := newMockIteratorDecoder()
 
 	feeEstimator := &mockFeeEstimator{
 		byteFeeIn:   make(chan btcutil.Amount),
@@ -770,12 +768,13 @@ func newThreeHopNetwork(t testing.TB, aliceChannel, firstBobChannel,
 	aliceTicker := time.NewTicker(50 * time.Millisecond)
 	aliceChannelLink := NewChannelLink(
 		ChannelLinkConfig{
-			FwrdingPolicy:     globalPolicy,
-			Peer:              bobServer,
-			Switch:            aliceServer.htlcSwitch,
-			DecodeHopIterator: decoder.DecodeHopIterator,
-			DecodeOnionObfuscator: func(io.Reader) (ErrorEncrypter,
-				lnwire.FailCode) {
+			FwrdingPolicy:      globalPolicy,
+			Peer:               bobServer,
+			Switch:             aliceServer.htlcSwitch,
+			DecodeHopIterator:  decoder.DecodeHopIterator,
+			DecodeHopIterators: decoder.DecodeHopIterators,
+			DecodeOnionObfuscator: func(*sphinx.OnionPacket) (
+				ErrorEncrypter, lnwire.FailCode) {
 				return obfuscator, lnwire.CodeNone
 			},
 			GetLastChannelUpdate: mockGetChanUpdateMessage,
@@ -816,12 +815,13 @@ func newThreeHopNetwork(t testing.TB, aliceChannel, firstBobChannel,
 	firstBobTicker := time.NewTicker(50 * time.Millisecond)
 	firstBobChannelLink := NewChannelLink(
 		ChannelLinkConfig{
-			FwrdingPolicy:     globalPolicy,
-			Peer:              aliceServer,
-			Switch:            bobServer.htlcSwitch,
-			DecodeHopIterator: decoder.DecodeHopIterator,
-			DecodeOnionObfuscator: func(io.Reader) (ErrorEncrypter,
-				lnwire.FailCode) {
+			FwrdingPolicy:      globalPolicy,
+			Peer:               aliceServer,
+			Switch:             bobServer.htlcSwitch,
+			DecodeHopIterator:  decoder.DecodeHopIterator,
+			DecodeHopIterators: decoder.DecodeHopIterators,
+			DecodeOnionObfuscator: func(*sphinx.OnionPacket) (
+				ErrorEncrypter, lnwire.FailCode) {
 				return obfuscator, lnwire.CodeNone
 			},
 			GetLastChannelUpdate: mockGetChanUpdateMessage,
@@ -862,12 +862,13 @@ func newThreeHopNetwork(t testing.TB, aliceChannel, firstBobChannel,
 	secondBobTicker := time.NewTicker(50 * time.Millisecond)
 	secondBobChannelLink := NewChannelLink(
 		ChannelLinkConfig{
-			FwrdingPolicy:     globalPolicy,
-			Peer:              carolServer,
-			Switch:            bobServer.htlcSwitch,
-			DecodeHopIterator: decoder.DecodeHopIterator,
-			DecodeOnionObfuscator: func(io.Reader) (ErrorEncrypter,
-				lnwire.FailCode) {
+			FwrdingPolicy:      globalPolicy,
+			Peer:               carolServer,
+			Switch:             bobServer.htlcSwitch,
+			DecodeHopIterator:  decoder.DecodeHopIterator,
+			DecodeHopIterators: decoder.DecodeHopIterators,
+			DecodeOnionObfuscator: func(*sphinx.OnionPacket) (
+				ErrorEncrypter, lnwire.FailCode) {
 				return obfuscator, lnwire.CodeNone
 			},
 			GetLastChannelUpdate: mockGetChanUpdateMessage,
@@ -908,12 +909,13 @@ func newThreeHopNetwork(t testing.TB, aliceChannel, firstBobChannel,
 	carolTicker := time.NewTicker(50 * time.Millisecond)
 	carolChannelLink := NewChannelLink(
 		ChannelLinkConfig{
-			FwrdingPolicy:     globalPolicy,
-			Peer:              bobServer,
-			Switch:            carolServer.htlcSwitch,
-			DecodeHopIterator: decoder.DecodeHopIterator,
-			DecodeOnionObfuscator: func(io.Reader) (ErrorEncrypter,
-				lnwire.FailCode) {
+			FwrdingPolicy:      globalPolicy,
+			Peer:               bobServer,
+			Switch:             carolServer.htlcSwitch,
+			DecodeHopIterator:  decoder.DecodeHopIterator,
+			DecodeHopIterators: decoder.DecodeHopIterators,
+			DecodeOnionObfuscator: func(*sphinx.OnionPacket) (
+				ErrorEncrypter, lnwire.FailCode) {
 				return obfuscator, lnwire.CodeNone
 			},
 			GetLastChannelUpdate: mockGetChanUpdateMessage,
