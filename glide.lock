@@ -1,5 +1,5 @@
-hash: f72fdbb4d93ddd98991e830f978bfe9e08623e2a9976857b0f7668641486369c
-updated: 2018-01-29T15:55:37.905498329-07:00
+hash: d4975d624a11c09f4927276c72da98181dfffe262bebc9dc6d8ff033d4d31bd4
+updated: 2018-02-01T02:27:50.067792-08:00
 imports:
 - name: github.com/aead/chacha20
   version: d31a916ded42d1640b9d89a26f8abd53cc96790c
@@ -77,7 +77,8 @@ imports:
   - filterdb
   - headerfs
 - name: github.com/lightningnetwork/lightning-onion
-  version: 18bf6612a0653a21daf1a08b4a59e54670a524a1
+  version: 5215b8c4ef85e4caf96d9aa85b063a0ab22a1c15
+  repo: https://github.com/cfromknecht/lightning-onion.git
 - name: github.com/ltcsuite/ltcd
   version: 5f654d5faab99ee2b3488fabba98e5f7a5257ee3
   subpackages:
@@ -209,6 +210,7 @@ imports:
   subpackages:
   - bakery
   - bakery/checkers
+  - bakery/internal/macaroonpb
 - name: gopkg.in/macaroon.v2
   version: bed2a428da6e56d950bed5b41fcbae3141e5b0d0
 testImports: []
