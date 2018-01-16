@@ -929,7 +929,7 @@ func (l *channelLink) handleDownStreamPkt(pkt *htlcPacket, isReProcess bool) {
 					incomingChanID: pkt.incomingChanID,
 					incomingHTLCID: pkt.incomingHTLCID,
 					amount:         htlc.Amount,
-					isRouted:       true,
+					hasSource:      true,
 					localFailure:   localFailure,
 					htlc: &lnwire.UpdateFailHTLC{
 						Reason: reason,
@@ -948,18 +948,20 @@ func (l *channelLink) handleDownStreamPkt(pkt *htlcPacket, isReProcess bool) {
 			"local_log_index=%v, batch_size=%v",
 			htlc.PaymentHash[:], index, l.batchCounter+1)
 
+		pkt.outgoingChanID = l.ShortChanID()
+		pkt.outgoingHTLCID = index
+		htlc.ID = index
+
+		log.Debugf("Persisting keystone to create open circuit: %v->%v",
+			pkt.inKey(), pkt.outKey())
+
 		// Create circuit (remember the path) in order to forward settle/fail
 		// packet back.
-		l.cfg.Switch.addCircuit(&PaymentCircuit{
-			PaymentHash:    htlc.PaymentHash,
-			IncomingChanID: pkt.incomingChanID,
-			IncomingHTLCID: pkt.incomingHTLCID,
-			OutgoingChanID: l.ShortChanID(),
-			OutgoingHTLCID: index,
-			ErrorEncrypter: pkt.obfuscator,
-		})
+		if err := l.cfg.Switch.setKeystone(pkt.inKey(), pkt.outKey()); err != nil {
+			l.fail("unable to add full circuit: %v", err)
+			return
+		}
 
-		htlc.ID = index
 		l.cfg.Peer.SendMessage(htlc)
 
 	case *lnwire.UpdateFulfillHTLC:
@@ -1387,8 +1389,11 @@ func (l *channelLink) String() string {
 // another peer or if the update was created by user
 //
 // NOTE: Part of the ChannelLink interface.
-func (l *channelLink) HandleSwitchPacket(packet *htlcPacket) {
-	l.mailBox.AddPacket(packet)
+func (l *channelLink) HandleSwitchPacket(pkt *htlcPacket) error {
+	log.Debugf("ChannelLink(%s) received switch packet inkey=%v, outkey=%v",
+		l.ShortChanID(), pkt.inKey(), pkt.outKey())
+	l.mailBox.AddPacket(pkt)
+	return nil
 }
 
 // HandleChannelUpdate handles the htlc requests as settle/add/fail which sent
