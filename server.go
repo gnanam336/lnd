@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"image/color"
 	"net"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -140,6 +141,13 @@ func newServer(listenAddrs []string, chanDB *channeldb.DB, cc *chainControl,
 	globalFeatures := lnwire.NewRawFeatureVector()
 
 	serializedPubKey := privKey.PubKey().SerializeCompressed()
+
+	routerDir := filepath.Dir(chanDB.Path())
+
+	sphinxProcessor := htlcswitch.NewOnionProcessor(
+		sphinx.NewRouter(routerDir, privKey, activeNetParams.Params,
+			cc.chainNotifier))
+
 	s := &server{
 		chanDB: chanDB,
 		cc:     cc,
@@ -151,8 +159,7 @@ func newServer(listenAddrs []string, chanDB *channeldb.DB, cc *chainControl,
 
 		// TODO(roasbeef): derive proper onion key based on rotation
 		// schedule
-		sphinx: htlcswitch.NewOnionProcessor(
-			sphinx.NewRouter(privKey, activeNetParams.Params)),
+		sphinx:      sphinxProcessor,
 		lightningID: sha256.Sum256(serializedPubKey),
 
 		persistentPeers:       make(map[string]struct{}),
@@ -477,6 +484,9 @@ func (s *server) Start() error {
 		return err
 	}
 
+	if err := s.sphinx.Start(); err != nil {
+		return err
+	}
 	if err := s.htlcSwitch.Start(); err != nil {
 		return err
 	}
@@ -537,6 +547,7 @@ func (s *server) Stop() error {
 
 	// Shutdown the wallet, funding manager, and the rpc server.
 	s.cc.chainNotifier.Stop()
+	s.sphinx.Stop()
 	s.chanRouter.Stop()
 	s.htlcSwitch.Stop()
 	s.utxoNursery.Stop()
