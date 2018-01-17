@@ -46,6 +46,32 @@ type ErrorDecrypter interface {
 	DecryptError(lnwire.OpaqueReason) (*ForwardingError, error)
 }
 
+// EncrypterType establishes an enum used in serialization to indicate how to
+// decode a concrete instance of the ErrorEncrypter interface.
+type EncrypterType byte
+
+const (
+	// EncrypterTypeNone signals that no error encyrpter is present, this
+	// can happen if the htlc is originates in the switch.
+	EncrypterTypeNone EncrypterType = iota
+
+	// EncrypterTypeSphinx is used to identify a sphinx onion error
+	// encrypter instance.
+	EncrypterTypeSphinx
+
+	// EncrypterTypeMock is used to identify a mock obfuscator instance.
+	EncrypterTypeMock
+)
+
+// UnknownEncrypterType is an error message used to signal that an unexpected
+// EncrypterType was encountered during decoding.
+type UnknownEncrypterType EncrypterType
+
+// Error returns a formatted error indicating the invalid EncrypterType.
+func (e UnknownEncrypterType) Error() string {
+	return fmt.Sprintf("unknown error encrypter type: %d", e)
+}
+
 // ErrorEncrypter is an interface that is used to encrypt HTLC related errors
 // at the source of the error, and also at each intermediate hop all the way
 // back to the source of the payment.
@@ -61,8 +87,15 @@ type ErrorEncrypter interface {
 	// until the error arrives at the source of the payment.
 	IntermediateEncrypt(lnwire.OpaqueReason) lnwire.OpaqueReason
 
-	Encode(w io.Writer) error
-	Decode(r io.Reader) error
+	// Type returns an enum indicating the underlying concrete instance
+	// backing this interface.
+	Type() EncrypterType
+
+	// Encode serializes the encrypter to the given io.Writer.
+	Encode(io.Writer) error
+
+	// Decode deserializes the encrypter from the given io.Reader.
+	Decode(io.Reader) error
 }
 
 // SphinxErrorEncrypter is a concrete implementation of both the ErrorEncrypter
@@ -77,6 +110,14 @@ type SphinxErrorEncrypter struct {
 
 func (s *SphinxErrorEncrypter) OnionPacket() *sphinx.OnionPacket {
 	return s.ogPacket
+}
+
+// NewSphinxErrorEncrypter initializes a new sphinx error encrypter as well as
+// the embedded onion error encrypter.
+func NewSphinxErrorEncrypter() *SphinxErrorEncrypter {
+	return &SphinxErrorEncrypter{
+		&sphinx.OnionErrorEncrypter{},
+	}
 }
 
 // EncryptFirstHop transforms a concrete failure message into an encrypted
@@ -107,12 +148,22 @@ func (s *SphinxErrorEncrypter) IntermediateEncrypt(reason lnwire.OpaqueReason) l
 	return s.EncryptError(false, reason)
 }
 
-func (s *SphinxErrorEncrypter) Encode(w io.Writer) error {
-	return nil
+// Type returns the identifier for a sphinx error encrypter.
+func (s *SphinxErrorEncrypter) Type() EncrypterType {
+	return EncrypterTypeSphinx
 }
 
+// Encode serializes the error encrypter to the provided io.Writer.
+func (s *SphinxErrorEncrypter) Encode(w io.Writer) error {
+	return s.OnionErrorEncrypter.Encode(w)
+}
+
+// Decode reconstructs the error encrypter from the provided io.Reader.
 func (s *SphinxErrorEncrypter) Decode(r io.Reader) error {
-	return nil
+	if s.OnionErrorEncrypter == nil {
+		s.OnionErrorEncrypter = &sphinx.OnionErrorEncrypter{}
+	}
+	return s.OnionErrorEncrypter.Decode(r)
 }
 
 // A compile time check to ensure SphinxErrorEncrypter implements the
