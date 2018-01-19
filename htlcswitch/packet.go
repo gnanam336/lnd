@@ -42,6 +42,10 @@ type htlcPacket struct {
 	// destRef...
 	destRef *channeldb.SettleFailRef
 
+	// incomingAmount is the value in milli-satoshis that arrived on an
+	// incoming link.
+	incomingAmount lnwire.MilliSatoshi
+
 	// amount is the value of the HTLC that is being created or modified.
 	amount lnwire.MilliSatoshi
 
@@ -57,10 +61,10 @@ type htlcPacket struct {
 	// encrypted with any shared secret.
 	localFailure bool
 
-	// isRouted is set to true if the incomingChanID and incomingHTLCID fields
-	// of a forwarded fail packet are already set and do not need to be looked
-	// up in the circuit map.
-	isRouted bool
+	// hasSource is set to true if the incomingChanID and incomingHTLCID
+	// fields of a forwarded fail packet are already set and do not need to
+	// be looked up in the circuit map.
+	hasSource bool
 
 	// isResolution is set to true if this packet was actually an incoming
 	// resolution message from an outside sub-system. We'll treat these as
@@ -70,131 +74,18 @@ type htlcPacket struct {
 	isResolution bool
 }
 
-func (h *htlcPacket) Encode(w io.Writer) error {
-	var scratch [8]byte
-
-	binary.BigEndian.PutUint64(scratch[:], h.fwdIndex)
-	if _, err := w.Write(scratch[:]); err != nil {
-		return err
+// inKey returns the circuit key used to identify the incoming htlc.
+func (p *htlcPacket) inKey() CircuitKey {
+	return CircuitKey{
+		ChanID: p.incomingChanID,
+		HtlcID: p.incomingHTLCID,
 	}
-
-	if _, err := w.Write(h.destNode[:]); err != nil {
-		return err
-	}
-
-	inChanID := h.incomingChanID.ToUint64()
-	binary.BigEndian.PutUint64(scratch[:], inChanID)
-	if _, err := w.Write(scratch[:]); err != nil {
-		return err
-	}
-
-	outChanID := h.outgoingChanID.ToUint64()
-	binary.BigEndian.PutUint64(scratch[:], outChanID)
-	if _, err := w.Write(scratch[:]); err != nil {
-		return err
-	}
-
-	binary.BigEndian.PutUint64(scratch[:], h.incomingHTLCID)
-	if _, err := w.Write(scratch[:]); err != nil {
-		return err
-	}
-
-	binary.BigEndian.PutUint64(scratch[:], h.outgoingHTLCID)
-	if _, err := w.Write(scratch[:]); err != nil {
-		return err
-	}
-
-	binary.BigEndian.PutUint64(scratch[:], uint64(h.amount))
-	if _, err := w.Write(scratch[:]); err != nil {
-		return err
-	}
-
-	if _, err := lnwire.WriteMessage(w, h.htlc, 0); err != nil {
-		return err
-	}
-
-	if err := h.obfuscator.Encode(w); err != nil {
-		return err
-	}
-
-	err := binary.Write(w, binary.BigEndian, h.localFailure)
-	if err != nil {
-		return err
-	}
-
-	err = binary.Write(w, binary.BigEndian, h.isRouted)
-	if err != nil {
-		return err
-	}
-
-	return nil
 }
 
-func (h *htlcPacket) Decode(r io.Reader) error {
-	var scratch [8]byte
-
-	if _, err := r.Read(scratch[:]); err != nil {
-		return err
+// outKey returns the circuit key used to identify the outgoing, forwarded htlc.
+func (p *htlcPacket) outKey() CircuitKey {
+	return CircuitKey{
+		ChanID: p.outgoingChanID,
+		HtlcID: p.outgoingHTLCID,
 	}
-	h.fwdIndex = binary.BigEndian.Uint64(scratch[:])
-
-	if _, err := r.Read(h.destNode[:]); err != nil {
-		return err
-	}
-
-	if _, err := r.Read(scratch[:]); err != nil {
-		return err
-	}
-	h.incomingChanID = lnwire.NewShortChanIDFromInt(
-		binary.BigEndian.Uint64(scratch[:]),
-	)
-
-	if _, err := r.Read(scratch[:]); err != nil {
-		return err
-	}
-	h.outgoingChanID = lnwire.NewShortChanIDFromInt(
-		binary.BigEndian.Uint64(scratch[:]),
-	)
-
-	if _, err := r.Read(scratch[:]); err != nil {
-		return err
-	}
-	h.incomingHTLCID = binary.BigEndian.Uint64(scratch[:])
-
-	if _, err := r.Read(scratch[:]); err != nil {
-		return err
-	}
-	h.outgoingHTLCID = binary.BigEndian.Uint64(scratch[:])
-
-	if _, err := r.Read(scratch[:]); err != nil {
-		return err
-	}
-	h.amount = lnwire.MilliSatoshi(
-		binary.BigEndian.Uint64(scratch[:]),
-	)
-
-	htlc, err := lnwire.ReadMessage(r, 0)
-	if err != nil {
-		return err
-	}
-	h.htlc = htlc
-
-	h.obfuscator = &SphinxErrorEncrypter{
-		OnionErrorEncrypter: &sphinx.OnionErrorEncrypter{},
-	}
-	if err := h.obfuscator.Decode(r); err != nil {
-		return err
-	}
-
-	err = binary.Read(r, binary.BigEndian, &h.localFailure)
-	if err != nil {
-		return err
-	}
-
-	err = binary.Read(r, binary.BigEndian, &h.isRouted)
-	if err != nil {
-		return err
-	}
-
-	return nil
 }
