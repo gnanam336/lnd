@@ -35,6 +35,7 @@ import (
 	proxy "github.com/grpc-ecosystem/grpc-gateway/runtime"
 	flags "github.com/jessevdk/go-flags"
 	"github.com/lightningnetwork/lnd/autopilot"
+	"github.com/lightningnetwork/lnd/build"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/lightningnetwork/lnd/lnwallet"
@@ -109,7 +110,8 @@ func lndMain() error {
 	}()
 
 	// Show version at startup.
-	ltndLog.Infof("Version %s", version())
+	ltndLog.Infof("Version: %s, build: %s, logging: %s",
+		version(), build.Type, build.LoggingType)
 
 	// Enable http profiling server if requested.
 	if cfg.Profile != "" {
