@@ -149,7 +149,7 @@ fi
 
 # Required for the integration tests
 print "* Build source"
-go install -v . ./cmd/...
+go install -v -tags testing . ./cmd/...
 
 # Lint check is first because we shouldn't run tests on garbage code.
 if [ "$NEED_LINT" == "true" ] || [ "$RACE" == "false" ]; then

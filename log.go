@@ -12,6 +12,7 @@ import (
 	"github.com/jrick/logrotate/rotator"
 	"github.com/lightninglabs/neutrino"
 	"github.com/lightningnetwork/lnd/autopilot"
+	"github.com/lightningnetwork/lnd/build"
 	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/contractcourt"
@@ -22,16 +23,6 @@ import (
 	"github.com/roasbeef/btcd/connmgr"
 )
 
-// logWriter implements an io.Writer that outputs to both standard output and
-// the write-end pipe of an initialized log rotator.
-type logWriter struct{}
-
-func (logWriter) Write(p []byte) (n int, err error) {
-	os.Stdout.Write(p)
-	logRotatorPipe.Write(p)
-	return len(p), nil
-}
-
 // Loggers per subsystem.  A single backend logger is created and all subsytem
 // loggers created from it will write to the backend.  When adding new
 // subsystems, add the subsystem logger variable here and to the
@@ -41,19 +32,17 @@ func (logWriter) Write(p []byte) (n int, err error) {
 // log file.  This must be performed early during application startup by
 // calling initLogRotator.
 var (
+	logWriter = &build.LogWriter{}
+
 	// backendLog is the logging backend used to create all subsystem
 	// loggers.  The backend must not be used before the log rotator has
 	// been initialized, or data races and/or nil pointer dereferences will
 	// occur.
-	backendLog = btclog.NewBackend(logWriter{})
+	backendLog = btclog.NewBackend(logWriter)
 
 	// logRotator is one of the logging outputs.  It should be closed on
 	// application shutdown.
 	logRotator *rotator.Rotator
-
-	// logRotatorPipe is the write-end pipe for writing to the log rotator.
-	// It is written to by the Write method of the logWriter type.
-	logRotatorPipe *io.PipeWriter
 
 	ltndLog = backendLog.Logger("LTND")
 	lnwlLog = backendLog.Logger("LNWL")
@@ -76,16 +65,36 @@ var (
 
 // Initialize package-global logger variables.
 func init() {
-	lnwallet.UseLogger(lnwlLog)
-	discovery.UseLogger(discLog)
-	chainntnfs.UseLogger(ntfnLog)
-	channeldb.UseLogger(chdbLog)
-	htlcswitch.UseLogger(hswcLog)
-	connmgr.UseLogger(cmgrLog)
-	routing.UseLogger(crtrLog)
-	neutrino.UseLogger(btcnLog)
-	autopilot.UseLogger(atplLog)
-	contractcourt.UseLogger(cnctLog)
+	switch build.LoggingType {
+	case build.LogTypeDefault:
+		switch build.Deployment {
+		case build.Production, build.Testing:
+			lnwallet.UseLogger(lnwlLog)
+			discovery.UseLogger(discLog)
+			chainntnfs.UseLogger(ntfnLog)
+			channeldb.UseLogger(chdbLog)
+			htlcswitch.UseLogger(hswcLog)
+			connmgr.UseLogger(cmgrLog)
+			routing.UseLogger(crtrLog)
+			neutrino.UseLogger(btcnLog)
+			autopilot.UseLogger(atplLog)
+			contractcourt.UseLogger(cnctLog)
+
+		// When run in development mode, we disable logs by default.
+		case build.Development:
+			ltndLog = btclog.Disabled
+		}
+
+	case build.LogTypeStdOut:
+		connmgr.UseLogger(build.NewSubLogger("CMGR", build.LogLevel))
+		neutrino.UseLogger(build.NewSubLogger("BTCN", build.LogLevel))
+		ltndLog = build.NewSubLogger("LTND", build.LogLevel)
+
+	case build.LogTypeNone:
+		connmgr.UseLogger(btclog.Disabled)
+		neutrino.UseLogger(btclog.Disabled)
+		ltndLog = btclog.Disabled
+	}
 }
 
 // subsystemLoggers maps each subsystem identifier to its associated logger.
@@ -129,7 +138,7 @@ func initLogRotator(logFile string) {
 	go r.Run(pr)
 
 	logRotator = r
-	logRotatorPipe = pw
+	logWriter.RotatorPipe = pw
 }
 
 // setLogLevel sets the logging level for provided subsystem.  Invalid

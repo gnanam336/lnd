@@ -10,7 +10,9 @@ import (
 	"sync/atomic"
 
 	"github.com/boltdb/bolt"
+	"github.com/btcsuite/btclog"
 	"github.com/davecgh/go-spew/spew"
+	"github.com/lightningnetwork/lnd/build"
 	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/contractcourt"
@@ -37,6 +39,15 @@ var (
 	// before broadcasting the sweep txn.
 	justiceTxnBucket = []byte("justice-txn")
 )
+
+func init() {
+	switch build.LoggingType {
+	case build.LogTypeStdOut:
+		brarLog = build.NewSubLogger("BRAR", build.LogLevel)
+	default:
+		brarLog = btclog.Disabled
+	}
+}
 
 // BreachConfig bundles the required subsystems used by the breach arbiter. An
 // instance of BreachConfig is passed to newBreachArbiter during instantiation.

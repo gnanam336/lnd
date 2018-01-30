@@ -13,8 +13,10 @@ import (
 	"golang.org/x/crypto/salsa20"
 
 	"github.com/boltdb/bolt"
+	"github.com/btcsuite/btclog"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/go-errors/errors"
+	"github.com/lightningnetwork/lnd/build"
 	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/htlcswitch"
@@ -53,6 +55,16 @@ const (
 	// the channel. 288 blocks is ~48 hrs
 	maxWaitNumBlocksFundingConf = 288
 )
+
+func init() {
+	switch build.LoggingType {
+	case build.LogTypeStdOut:
+		stdLogger := build.NewSubLogger("FMGR", build.LogLevel)
+		fndgLog = stdLogger
+	default:
+		fndgLog = btclog.Disabled
+	}
+}
 
 // reservationWithCtx encapsulates a pending channel reservation. This wrapper
 // struct is used internally within the funding manager to track and progress

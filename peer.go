@@ -8,8 +8,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/btcsuite/btclog"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/lightningnetwork/lnd/brontide"
+	"github.com/lightningnetwork/lnd/build"
 	"github.com/lightningnetwork/lnd/contractcourt"
 
 	"bytes"
@@ -44,6 +46,17 @@ const (
 	// this struct.
 	outgoingQueueLen = 50
 )
+
+func init() {
+	switch build.LoggingType {
+	case build.LogTypeStdOut:
+		peerLog = build.NewSubLogger("PEER", build.LogLevel)
+		srvrLog = build.NewSubLogger("SRVR", build.LogLevel)
+	default:
+		peerLog = btclog.Disabled
+		srvrLog = btclog.Disabled
+	}
+}
 
 // outgoinMsg packages an lnwire.Message to be sent out on the wire, along with
 // a buffered channel which will be sent upon once the write is complete. This

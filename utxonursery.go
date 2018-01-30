@@ -9,7 +9,9 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/btcsuite/btclog"
 	"github.com/davecgh/go-spew/spew"
+	"github.com/lightningnetwork/lnd/build"
 	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/lnwallet"
@@ -170,6 +172,15 @@ var (
 	// retrieve information about a queried contract.
 	ErrContractNotFound = fmt.Errorf("unable to locate contract")
 )
+
+func init() {
+	switch build.LoggingType {
+	case build.LogTypeStdOut:
+		utxnLog = build.NewSubLogger("UTXN", build.LogLevel)
+	default:
+		utxnLog = btclog.Disabled
+	}
+}
 
 // NurseryConfig abstracts the required subsystems used by the utxo nursery. An
 // instance of NurseryConfig is passed to newUtxoNursery during instantiation.

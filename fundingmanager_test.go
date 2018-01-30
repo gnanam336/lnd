@@ -11,10 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btclog"
 	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/channeldb"
-	"github.com/lightningnetwork/lnd/contractcourt"
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/lightningnetwork/lnd/lnwire"
@@ -131,13 +129,6 @@ type testNode struct {
 	mockNotifier    *mockNotifier
 	testDir         string
 	shutdownChannel chan struct{}
-}
-
-func init() {
-	channeldb.UseLogger(btclog.Disabled)
-	lnwallet.UseLogger(btclog.Disabled)
-	contractcourt.UseLogger(btclog.Disabled)
-	fndgLog = btclog.Disabled
 }
 
 func createTestWallet(cdb *channeldb.DB, netParams *chaincfg.Params,

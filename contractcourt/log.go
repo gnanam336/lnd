@@ -1,6 +1,9 @@
 package contractcourt
 
-import "github.com/btcsuite/btclog"
+import (
+	"github.com/btcsuite/btclog"
+	"github.com/lightningnetwork/lnd/build"
+)
 
 // log is a logger that is initialized with no output filters.  This
 // means the package will not perform any logging by default until the caller
@@ -9,7 +12,12 @@ var log btclog.Logger
 
 // The default amount of logging is none.
 func init() {
-	DisableLog()
+	switch build.LoggingType {
+	case build.LogTypeStdOut:
+		UseLogger(build.NewSubLogger("CNCT", build.LogLevel))
+	default:
+		DisableLog()
+	}
 }
 
 // DisableLog disables all library log output.  Logging output is disabled

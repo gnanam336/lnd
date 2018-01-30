@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btclog"
 	"github.com/go-errors/errors"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/contractcourt"
@@ -264,10 +263,6 @@ var (
 )
 
 func init() {
-	channeldb.UseLogger(btclog.Disabled)
-	lnwallet.UseLogger(btclog.Disabled)
-	brarLog = btclog.Disabled
-
 	// Ensure that breached outputs are initialized before starting tests.
 	if err := initBreachedOutputs(); err != nil {
 		panic(err)

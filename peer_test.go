@@ -6,10 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btclog"
 	"github.com/lightningnetwork/lnd/chainntnfs"
-	"github.com/lightningnetwork/lnd/channeldb"
-	"github.com/lightningnetwork/lnd/contractcourt"
 	"github.com/lightningnetwork/lnd/htlcswitch"
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/lightningnetwork/lnd/lnwallet"
@@ -19,15 +16,6 @@ import (
 	"github.com/roasbeef/btcd/wire"
 	"github.com/roasbeef/btcutil"
 )
-
-func init() {
-	peerLog = btclog.Disabled
-	srvrLog = btclog.Disabled
-	lnwallet.UseLogger(btclog.Disabled)
-	htlcswitch.UseLogger(btclog.Disabled)
-	channeldb.UseLogger(btclog.Disabled)
-	contractcourt.UseLogger(btclog.Disabled)
-}
 
 // TestPeerChannelClosureAcceptFeeResponder tests the shutdown responder's
 // behavior if we can agree on the fee immediately.

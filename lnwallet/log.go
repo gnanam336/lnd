@@ -2,6 +2,7 @@ package lnwallet
 
 import (
 	"github.com/btcsuite/btclog"
+	"github.com/lightningnetwork/lnd/build"
 	"github.com/roasbeef/btcwallet/chain"
 	btcwallet "github.com/roasbeef/btcwallet/wallet"
 	"github.com/roasbeef/btcwallet/wtxmgr"
@@ -14,7 +15,12 @@ var walletLog btclog.Logger
 
 // The default amount of logging is none.
 func init() {
-	DisableLog()
+	switch build.LoggingType {
+	case build.LogTypeStdOut:
+		UseLogger(build.NewSubLogger("LNWL", build.LogLevel))
+	default:
+		DisableLog()
+	}
 }
 
 // DisableLog disables all library log output.  Logging output is disabled

@@ -19,7 +19,9 @@ import (
 	"sync/atomic"
 
 	"github.com/boltdb/bolt"
+	"github.com/btcsuite/btclog"
 	"github.com/davecgh/go-spew/spew"
+	"github.com/lightningnetwork/lnd/build"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/htlcswitch"
 	"github.com/lightningnetwork/lnd/lnrpc"
@@ -271,6 +273,15 @@ const (
 	// defined in BOLT-0002.
 	maxPaymentMSat = lnwire.MilliSatoshi(math.MaxUint32)
 )
+
+func init() {
+	switch build.LoggingType {
+	case build.LogTypeStdOut:
+		rpcsLog = build.NewSubLogger("LTND", build.LogLevel)
+	default:
+		rpcsLog = btclog.Disabled
+	}
+}
 
 // rpcServer is a gRPC, RPC front end to the lnd daemon.
 // TODO(roasbeef): pagination support for the list-style calls

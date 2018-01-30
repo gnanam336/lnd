@@ -111,7 +111,7 @@ func lndMain() error {
 
 	// Show version at startup.
 	ltndLog.Infof("Version: %s, build: %s, logging: %s",
-		version(), build.Type, build.LoggingType)
+		version(), build.Deployment, build.LoggingType)
 
 	// Enable http profiling server if requested.
 	if cfg.Profile != "" {
