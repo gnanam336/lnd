@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -53,6 +55,33 @@ var (
 	_, _ = testSig.S.SetString("1880105606924982582529128710493133386286603"+
 		"3135609736119018462340006816851118", 10)
 )
+
+var idSeqNum uint64
+
+func genIDs() (lnwire.ChannelID, lnwire.ChannelID, lnwire.ShortChannelID,
+	lnwire.ShortChannelID) {
+
+	id := atomic.AddUint64(&idSeqNum, 2)
+
+	var scratch [8]byte
+
+	binary.BigEndian.PutUint64(scratch[:], id)
+	hash1, _ := chainhash.NewHash(bytes.Repeat(scratch[:], 4))
+
+	binary.BigEndian.PutUint64(scratch[:], id+1)
+	hash2, _ := chainhash.NewHash(bytes.Repeat(scratch[:], 4))
+
+	chanPoint1 := wire.NewOutPoint(hash1, uint32(id))
+	chanPoint2 := wire.NewOutPoint(hash2, uint32(id+1))
+
+	chanID1 := lnwire.NewChanIDFromOutPoint(chanPoint1)
+	chanID2 := lnwire.NewChanIDFromOutPoint(chanPoint2)
+
+	aliceChanID := lnwire.NewShortChanIDFromInt(id)
+	bobChanID := lnwire.NewShortChanIDFromInt(id + 1)
+
+	return chanID1, chanID2, aliceChanID, bobChanID
+}
 
 // mockGetChanUpdateMessage helper function which returns topology update
 // of the channel
@@ -715,7 +744,9 @@ func newThreeHopNetwork(t testing.TB, aliceChannel, firstBobChannel,
 
 	// Create mock decoder instead of sphinx one in order to mock the route
 	// which htlc should follow.
-	decoder := newMockIteratorDecoder()
+	aliceDecoder := newMockIteratorDecoder()
+	bobDecoder := newMockIteratorDecoder()
+	carolDecoder := newMockIteratorDecoder()
 
 	feeEstimator := &mockFeeEstimator{
 		byteFeeIn:   make(chan btcutil.Amount),
@@ -746,8 +777,8 @@ func newThreeHopNetwork(t testing.TB, aliceChannel, firstBobChannel,
 			FwrdingPolicy:      globalPolicy,
 			Peer:               bobServer,
 			Switch:             aliceServer.htlcSwitch,
-			DecodeHopIterator:  decoder.DecodeHopIterator,
-			DecodeHopIterators: decoder.DecodeHopIterators,
+			DecodeHopIterator:  aliceDecoder.DecodeHopIterator,
+			DecodeHopIterators: aliceDecoder.DecodeHopIterators,
 			DecodeOnionObfuscator: func(*sphinx.OnionPacket) (
 				ErrorEncrypter, lnwire.FailCode) {
 				return obfuscator, lnwire.CodeNone
@@ -786,8 +817,8 @@ func newThreeHopNetwork(t testing.TB, aliceChannel, firstBobChannel,
 			FwrdingPolicy:      globalPolicy,
 			Peer:               aliceServer,
 			Switch:             bobServer.htlcSwitch,
-			DecodeHopIterator:  decoder.DecodeHopIterator,
-			DecodeHopIterators: decoder.DecodeHopIterators,
+			DecodeHopIterator:  bobDecoder.DecodeHopIterator,
+			DecodeHopIterators: bobDecoder.DecodeHopIterators,
 			DecodeOnionObfuscator: func(*sphinx.OnionPacket) (
 				ErrorEncrypter, lnwire.FailCode) {
 				return obfuscator, lnwire.CodeNone
@@ -826,8 +857,8 @@ func newThreeHopNetwork(t testing.TB, aliceChannel, firstBobChannel,
 			FwrdingPolicy:      globalPolicy,
 			Peer:               carolServer,
 			Switch:             bobServer.htlcSwitch,
-			DecodeHopIterator:  decoder.DecodeHopIterator,
-			DecodeHopIterators: decoder.DecodeHopIterators,
+			DecodeHopIterator:  bobDecoder.DecodeHopIterator,
+			DecodeHopIterators: bobDecoder.DecodeHopIterators,
 			DecodeOnionObfuscator: func(*sphinx.OnionPacket) (
 				ErrorEncrypter, lnwire.FailCode) {
 				return obfuscator, lnwire.CodeNone
@@ -866,8 +897,8 @@ func newThreeHopNetwork(t testing.TB, aliceChannel, firstBobChannel,
 			FwrdingPolicy:      globalPolicy,
 			Peer:               bobServer,
 			Switch:             carolServer.htlcSwitch,
-			DecodeHopIterator:  decoder.DecodeHopIterator,
-			DecodeHopIterators: decoder.DecodeHopIterators,
+			DecodeHopIterator:  carolDecoder.DecodeHopIterator,
+			DecodeHopIterators: carolDecoder.DecodeHopIterators,
 			DecodeOnionObfuscator: func(*sphinx.OnionPacket) (
 				ErrorEncrypter, lnwire.FailCode) {
 				return obfuscator, lnwire.CodeNone
