@@ -1,48 +1,16 @@
 package htlcswitch
 
 import (
-	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/binary"
 	"io"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/fastsha256"
 	"github.com/go-errors/errors"
 	"github.com/lightningnetwork/lnd/lnwire"
-	"github.com/roasbeef/btcd/chaincfg/chainhash"
-	"github.com/roasbeef/btcd/wire"
 )
-
-var idSeqNum uint64
-
-func genIDs() (lnwire.ChannelID, lnwire.ChannelID, lnwire.ShortChannelID,
-	lnwire.ShortChannelID) {
-
-	id := atomic.AddUint64(&idSeqNum, 2)
-
-	var scratch [8]byte
-
-	binary.BigEndian.PutUint64(scratch[:], id)
-	hash1, _ := chainhash.NewHash(bytes.Repeat(scratch[:], 4))
-
-	binary.BigEndian.PutUint64(scratch[:], id+1)
-	hash2, _ := chainhash.NewHash(bytes.Repeat(scratch[:], 4))
-
-	chanPoint1 := wire.NewOutPoint(hash1, uint32(id))
-	chanPoint2 := wire.NewOutPoint(hash2, uint32(id+1))
-
-	chanID1 := lnwire.NewChanIDFromOutPoint(chanPoint1)
-	chanID2 := lnwire.NewChanIDFromOutPoint(chanPoint2)
-
-	aliceChanID := lnwire.NewShortChanIDFromInt(id)
-	bobChanID := lnwire.NewShortChanIDFromInt(id + 1)
-
-	return chanID1, chanID2, aliceChanID, bobChanID
-}
 
 func genPreimage() ([32]byte, error) {
 	var preimage [32]byte
