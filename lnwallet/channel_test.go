@@ -102,7 +102,7 @@ func forceStateTransition(chanA, chanB *LightningChannel) error {
 		return err
 	}
 
-	if _, err := chanA.ReceiveRevocation(bobRevocation); err != nil {
+	if _, _, err := chanA.ReceiveRevocation(bobRevocation); err != nil {
 		return err
 	}
 	if err := chanA.ReceiveNewCommitment(bobSig, bobHtlcSigs); err != nil {
@@ -113,7 +113,7 @@ func forceStateTransition(chanA, chanB *LightningChannel) error {
 	if err != nil {
 		return err
 	}
-	if _, err := chanB.ReceiveRevocation(aliceRevocation); err != nil {
+	if _, _, err := chanB.ReceiveRevocation(aliceRevocation); err != nil {
 		return err
 	}
 
@@ -2128,7 +2128,7 @@ func TestUpdateFeeSenderCommits(t *testing.T) {
 	// Alice receives the revocation of the old one, and can now assume
 	// that Bob's received everything up to the signature she sent,
 	// including the HTLC and fee update.
-	if _, err := aliceChannel.ReceiveRevocation(bobRevocation); err != nil {
+	if _, _, err := aliceChannel.ReceiveRevocation(bobRevocation); err != nil {
 		t.Fatalf("alice unable to rocess bob's revocation: %v", err)
 	}
 
@@ -2155,7 +2155,7 @@ func TestUpdateFeeSenderCommits(t *testing.T) {
 	}
 
 	// Bob receives revocation from Alice.
-	if _, err := bobChannel.ReceiveRevocation(aliceRevocation); err != nil {
+	if _, _, err := bobChannel.ReceiveRevocation(aliceRevocation); err != nil {
 		t.Fatalf("bob unable to process alice's revocation: %v", err)
 	}
 
@@ -2223,7 +2223,7 @@ func TestUpdateFeeReceiverCommits(t *testing.T) {
 	}
 
 	// Bob receives the revocation of the old commitment
-	if _, err := bobChannel.ReceiveRevocation(aliceRevocation); err != nil {
+	if _, _, err := bobChannel.ReceiveRevocation(aliceRevocation); err != nil {
 		t.Fatalf("alice unable to rocess bob's revocation: %v", err)
 	}
 
@@ -2267,7 +2267,7 @@ func TestUpdateFeeReceiverCommits(t *testing.T) {
 
 	// Alice receives revokation from Bob, and can now be sure that Bob
 	// received the two updates, and they are considered locked in.
-	if _, err := aliceChannel.ReceiveRevocation(bobRevocation); err != nil {
+	if _, _, err := aliceChannel.ReceiveRevocation(bobRevocation); err != nil {
 		t.Fatalf("bob unable to process alice's revocation: %v", err)
 	}
 
@@ -2294,7 +2294,7 @@ func TestUpdateFeeReceiverCommits(t *testing.T) {
 	}
 
 	// Bob receives revocation from Alice.
-	if _, err := bobChannel.ReceiveRevocation(aliceRevocation); err != nil {
+	if _, _, err := bobChannel.ReceiveRevocation(aliceRevocation); err != nil {
 		t.Fatalf("bob unable to process alice's revocation: %v", err)
 	}
 }
@@ -2408,7 +2408,7 @@ func TestUpdateFeeMultipleUpdates(t *testing.T) {
 	// Alice receives the revocation of the old one, and can now assume that
 	// Bob's received everything up to the signature she sent, including the
 	// HTLC and fee update.
-	if _, err := aliceChannel.ReceiveRevocation(bobRevocation); err != nil {
+	if _, _, err := aliceChannel.ReceiveRevocation(bobRevocation); err != nil {
 		t.Fatalf("alice unable to rocess bob's revocation: %v", err)
 	}
 
@@ -2434,7 +2434,7 @@ func TestUpdateFeeMultipleUpdates(t *testing.T) {
 	}
 
 	// Bob receives revocation from Alice.
-	if _, err := bobChannel.ReceiveRevocation(aliceRevocation); err != nil {
+	if _, _, err := bobChannel.ReceiveRevocation(aliceRevocation); err != nil {
 		t.Fatalf("bob unable to process alice's revocation: %v", err)
 	}
 }
@@ -2854,7 +2854,7 @@ func TestChanSyncOweCommitment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bob unable to sign commitment: %v", err)
 	}
-	_, err = aliceChannel.ReceiveRevocation(bobRevocation)
+	_, _, err = aliceChannel.ReceiveRevocation(bobRevocation)
 	if err != nil {
 		t.Fatalf("alice unable to recv revocation: %v", err)
 	}
@@ -2866,7 +2866,7 @@ func TestChanSyncOweCommitment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("alice unable to revoke commitment: %v", err)
 	}
-	if _, err := bobChannel.ReceiveRevocation(aliceRevocation); err != nil {
+	if _, _, err := bobChannel.ReceiveRevocation(aliceRevocation); err != nil {
 		t.Fatalf("bob unable to recv revocation: %v", err)
 	}
 
@@ -3024,7 +3024,7 @@ func TestChanSyncOweRevocation(t *testing.T) {
 		t.Fatalf("bob unable to sign commitment: %v", err)
 	}
 
-	_, err = aliceChannel.ReceiveRevocation(bobRevocation)
+	_, _, err = aliceChannel.ReceiveRevocation(bobRevocation)
 	if err != nil {
 		t.Fatalf("alice unable to recv revocation: %v", err)
 	}
@@ -3107,7 +3107,7 @@ func TestChanSyncOweRevocation(t *testing.T) {
 	// TODO(roasbeef): restart bob too???
 
 	// We'll continue by then allowing bob to process Alice's revocation message.
-	if _, err := bobChannel.ReceiveRevocation(aliceRevocation); err != nil {
+	if _, _, err := bobChannel.ReceiveRevocation(aliceRevocation); err != nil {
 		t.Fatalf("bob unable to recv revocation: %v", err)
 	}
 
@@ -3287,7 +3287,7 @@ func TestChanSyncOweRevocationAndCommit(t *testing.T) {
 
 	// We'll now finish the state transition by having Alice process both
 	// messages, and send her final revocation.
-	_, err = aliceChannel.ReceiveRevocation(bobRevocation)
+	_, _, err = aliceChannel.ReceiveRevocation(bobRevocation)
 	if err != nil {
 		t.Fatalf("alice unable to recv revocation: %v", err)
 	}
@@ -3299,7 +3299,7 @@ func TestChanSyncOweRevocationAndCommit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("alice unable to revoke commitment: %v", err)
 	}
-	if _, err := bobChannel.ReceiveRevocation(aliceRevocation); err != nil {
+	if _, _, err := bobChannel.ReceiveRevocation(aliceRevocation); err != nil {
 		t.Fatalf("bob unable to recv revocation: %v", err)
 	}
 }
@@ -3473,7 +3473,7 @@ func TestChanSyncOweRevocationAndCommitForceTransition(t *testing.T) {
 	// Now, we'll continue the exchange, sending Bob's revocation and
 	// signature message to Alice, ending with Alice sending her revocation
 	// message to Bob.
-	_, err = aliceChannel.ReceiveRevocation(bobRevocation)
+	_, _, err = aliceChannel.ReceiveRevocation(bobRevocation)
 	if err != nil {
 		t.Fatalf("alice unable to recv revocation: %v", err)
 	}
@@ -3487,7 +3487,7 @@ func TestChanSyncOweRevocationAndCommitForceTransition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("alice unable to revoke commitment: %v", err)
 	}
-	if _, err := bobChannel.ReceiveRevocation(aliceRevocation); err != nil {
+	if _, _, err := bobChannel.ReceiveRevocation(aliceRevocation); err != nil {
 		t.Fatalf("bob unable to recv revocation: %v", err)
 	}
 }
@@ -3659,7 +3659,7 @@ func TestChannelRetransmissionFeeUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bob unable to sign commitment: %v", err)
 	}
-	_, err = aliceChannel.ReceiveRevocation(bobRevocation)
+	_, _, err = aliceChannel.ReceiveRevocation(bobRevocation)
 	if err != nil {
 		t.Fatalf("alice unable to recv revocation: %v", err)
 	}
@@ -3671,7 +3671,7 @@ func TestChannelRetransmissionFeeUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("alice unable to revoke commitment: %v", err)
 	}
-	if _, err := bobChannel.ReceiveRevocation(aliceRevocation); err != nil {
+	if _, _, err := bobChannel.ReceiveRevocation(aliceRevocation); err != nil {
 		t.Fatalf("bob unable to recv revocation: %v", err)
 	}
 
@@ -4031,9 +4031,9 @@ func TestLockedInHtlcForwardingSkipAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(aliceHtlcsToForward) != 0 {
+	if len(aliceHtlcsToForward.Htlcs) != 0 {
 		t.Fatalf("alice shouldn't forward any HTLC's, instead wants to "+
-			"forward %v htlcs", len(aliceHtlcsToForward))
+			"forward %v htlcs", len(aliceHtlcsToForward.Htlcs))
 	}
 
 	err = aliceChannel.ReceiveNewCommitment(bobSig, bobHtlcSigs)
@@ -4051,9 +4051,9 @@ func TestLockedInHtlcForwardingSkipAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(bobHtlcsToForward) != 2 {
+	if len(bobHtlcsToForward.Htlcs) != 2 {
 		t.Fatalf("bob should forward 2 hltcs, instead has %v",
-			len(bobHtlcsToForward))
+			len(bobHtlcsToForward.Htlcs))
 	}
 
 	// We'll now restart both Alice and Bob. This emulates a reconnection
@@ -4108,7 +4108,7 @@ func TestLockedInHtlcForwardingSkipAfterRestart(t *testing.T) {
 	// Bob should detect that he doesn't need to forward *any* HTLC's, as
 	// he was the one that initiated extending the commitment chain of
 	// Alice.
-	if len(bobHtlcsToForward) != 0 {
+	if len(bobHtlcsToForward.Htlcs) != 0 {
 		t.Fatalf("bob shouldn't forward any htlcs, but has: %v",
 			spew.Sdump(bobHtlcsToForward))
 	}
