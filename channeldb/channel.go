@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	glog "log"
 	"net"
 	"sync"
 
@@ -1107,16 +1106,17 @@ func (c *OpenChannel) AdvanceCommitChainTail(fwdPkg *FwdPkg) error {
 		if err != nil {
 			return err
 		}
-		glog.Printf("curr commit height: %v",
-			c.RemoteCommitment.CommitHeight)
+		//glog.Printf("curr commit height: %v", c.RemoteCommitment.CommitHeight)
 
-		for i := range fwdPkg.Htlcs {
-			fwdPkg.Htlcs[i].RemoteFwdRef = &FwdRef{
-				Source: c.ShortChanID,
-				Height: fwdPkg.Height,
-				Index:  uint16(i),
+		/*
+			for i := range fwdPkg.Htlcs {
+				fwdPkg.Htlcs[i].RemoteFwdRef = &FwdRef{
+					Source: c.ShortChanID,
+					Height: fwdPkg.Height,
+					Index:  uint16(i),
+				}
 			}
-		}
+		*/
 
 		if err := c.AddFwdPkg(tx, fwdPkg); err != nil {
 			return err
@@ -1124,7 +1124,7 @@ func (c *OpenChannel) AdvanceCommitChainTail(fwdPkg *FwdPkg) error {
 
 		newRemoteCommit = &newCommit.Commitment
 
-		glog.Printf("new commit height: %v", newRemoteCommit.CommitHeight)
+		//glog.Printf("new commit height: %v", newRemoteCommit.CommitHeight)
 
 		return nil
 	})
