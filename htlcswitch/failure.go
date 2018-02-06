@@ -3,6 +3,7 @@ package htlcswitch
 import (
 	"bytes"
 	"fmt"
+	"io"
 
 	"github.com/lightningnetwork/lightning-onion"
 	"github.com/lightningnetwork/lnd/lnwire"
