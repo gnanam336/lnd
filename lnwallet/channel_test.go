@@ -557,7 +557,7 @@ func TestSimpleAddSettleWorkflow(t *testing.T) {
 	// HTLC once he learns of the preimage.
 	var preimage [32]byte
 	copy(preimage[:], paymentPreimage)
-	err = bobChannel.SettleHTLC(preimage, bobHtlcIndex)
+	err = bobChannel.SettleHTLC(preimage, bobHtlcIndex, nil, nil)
 	if err != nil {
 		t.Fatalf("bob unable to settle inbound htlc: %v", err)
 	}
@@ -740,7 +740,7 @@ func TestCheckCommitTxSize(t *testing.T) {
 	for i := 10; i >= 0; i-- {
 		_, preimage := createHTLC(i, lnwire.MilliSatoshi(1e7))
 
-		err := bobChannel.SettleHTLC(preimage, uint64(i))
+		err := bobChannel.SettleHTLC(preimage, uint64(i), nil, nil)
 		if err != nil {
 			t.Fatalf("bob unable to settle inbound htlc: %v", err)
 		}
@@ -1155,7 +1155,7 @@ func TestForceCloseDustOutput(t *testing.T) {
 	}
 
 	// Settle HTLC and sign new commitment.
-	err = aliceChannel.SettleHTLC(preimage, aliceHtlcIndex)
+	err = aliceChannel.SettleHTLC(preimage, aliceHtlcIndex, nil, nil)
 	if err != nil {
 		t.Fatalf("bob unable to settle inbound htlc: %v", err)
 	}
@@ -1362,7 +1362,7 @@ func TestHTLCDustLimit(t *testing.T) {
 	}
 
 	// Settle HTLC and create a new commitment state.
-	err = bobChannel.SettleHTLC(preimage, bobHtlcIndex)
+	err = bobChannel.SettleHTLC(preimage, bobHtlcIndex, nil, nil)
 	if err != nil {
 		t.Fatalf("bob unable to settle inbound htlc: %v", err)
 	}
@@ -1435,7 +1435,7 @@ func TestChannelBalanceDustLimit(t *testing.T) {
 	if err := forceStateTransition(aliceChannel, bobChannel); err != nil {
 		t.Fatalf("state transition error: %v", err)
 	}
-	err = bobChannel.SettleHTLC(preimage, bobHtlcIndex)
+	err = bobChannel.SettleHTLC(preimage, bobHtlcIndex, nil, nil)
 	if err != nil {
 		t.Fatalf("bob unable to settle inbound htlc: %v", err)
 	}
@@ -1685,7 +1685,7 @@ func TestStateUpdatePersistence(t *testing.T) {
 	// Now settle all the HTLCs, then force a state update. The state
 	// update should succeed as both sides have identical.
 	for i := 0; i < 3; i++ {
-		err := bobChannelNew.SettleHTLC(alicePreimage, uint64(i))
+		err := bobChannelNew.SettleHTLC(alicePreimage, uint64(i), nil, nil)
 		if err != nil {
 			t.Fatalf("unable to settle htlc #%v: %v", i, err)
 		}
@@ -1694,7 +1694,7 @@ func TestStateUpdatePersistence(t *testing.T) {
 			t.Fatalf("unable to settle htlc#%v: %v", i, err)
 		}
 	}
-	err = aliceChannelNew.SettleHTLC(bobPreimage, 0)
+	err = aliceChannelNew.SettleHTLC(bobPreimage, 0, nil, nil)
 	if err != nil {
 		t.Fatalf("unable to settle htlc: %v", err)
 	}
@@ -1802,7 +1802,7 @@ func TestCancelHTLC(t *testing.T) {
 
 	// Now, with the HTLC committed on both sides, trigger a cancellation
 	// from Bob to Alice, removing the HTLC.
-	err = bobChannel.FailHTLC(bobHtlcIndex, []byte("failreason"))
+	err = bobChannel.FailHTLC(bobHtlcIndex, []byte("failreason"), nil, nil)
 	if err != nil {
 		t.Fatalf("unable to cancel HTLC: %v", err)
 	}
@@ -2579,7 +2579,7 @@ func TestChanSyncFullySynced(t *testing.T) {
 
 	// If bob settles the HTLC, and then initiates a state transition, they
 	// should both still think that they're in sync.
-	err = bobChannel.SettleHTLC(paymentPreimage, bobHtlcIndex)
+	err = bobChannel.SettleHTLC(paymentPreimage, bobHtlcIndex, nil, nil)
 	if err != nil {
 		t.Fatalf("unable to settle htlc: %v", err)
 	}
@@ -2707,7 +2707,7 @@ func TestChanSyncOweCommitment(t *testing.T) {
 	// Next, Alice's settles all 3 HTLC's from Bob, and also adds a new
 	// HTLC of her own.
 	for i := 0; i < 3; i++ {
-		err := aliceChannel.SettleHTLC(bobPreimage, uint64(i))
+		err := aliceChannel.SettleHTLC(bobPreimage, uint64(i), nil, nil)
 		if err != nil {
 			t.Fatalf("unable to settle htlc: %v", err)
 		}
@@ -2930,7 +2930,7 @@ func TestChanSyncOweCommitment(t *testing.T) {
 
 	// We'll conclude the test by having Bob settle Alice's HTLC, then
 	// initiate a state transition.
-	err = bobChannel.SettleHTLC(alicePreimage, bobHtlcIndex)
+	err = bobChannel.SettleHTLC(alicePreimage, bobHtlcIndex, nil, nil)
 	if err != nil {
 		t.Fatalf("unable to settle htlc: %v", err)
 	}
@@ -3009,7 +3009,7 @@ func TestChanSyncOweRevocation(t *testing.T) {
 
 	// Next, Alice will settle that single HTLC, the _begin_ the start of a
 	// state transition.
-	err = aliceChannel.SettleHTLC(bobPreimage, aliceHtlcIndex)
+	err = aliceChannel.SettleHTLC(bobPreimage, aliceHtlcIndex, nil, nil)
 	if err != nil {
 		t.Fatalf("unable to settle htlc: %v", err)
 	}
@@ -3195,7 +3195,7 @@ func TestChanSyncOweRevocationAndCommit(t *testing.T) {
 
 	// Next, Alice will settle that incoming HTLC, then we'll start the
 	// core of the test itself.
-	err = aliceChannel.SettleHTLC(bobPreimage, aliceHtlcIndex)
+	err = aliceChannel.SettleHTLC(bobPreimage, aliceHtlcIndex, nil, nil)
 	if err != nil {
 		t.Fatalf("unable to settle htlc: %v", err)
 	}
@@ -3364,7 +3364,7 @@ func TestChanSyncOweRevocationAndCommitForceTransition(t *testing.T) {
 
 	// Next, Alice will settle that incoming HTLC, then we'll start the
 	// core of the test itself.
-	err = aliceChannel.SettleHTLC(bobPreimage, aliceHtlcIndex)
+	err = aliceChannel.SettleHTLC(bobPreimage, aliceHtlcIndex, nil, nil)
 	if err != nil {
 		t.Fatalf("unable to settle htlc: %v", err)
 	}
@@ -3934,7 +3934,7 @@ func TestChanAvailableBandwidth(t *testing.T) {
 	// the update log).
 	for i := 0; i < (numHtlcs*2)-1; i++ {
 		preImage := alicePreimages[i]
-		err := bobChannel.SettleHTLC(preImage, uint64(i))
+		err := bobChannel.SettleHTLC(preImage, uint64(i), nil, nil)
 		if err != nil {
 			t.Fatalf("unable to settle htlc: %v", err)
 		}
@@ -3945,7 +3945,7 @@ func TestChanAvailableBandwidth(t *testing.T) {
 	}
 
 	htlcIndex := uint64((numHtlcs * 2) - 1)
-	err = bobChannel.FailHTLC(htlcIndex, []byte("f"))
+	err = bobChannel.FailHTLC(htlcIndex, []byte("f"), nil, nil)
 	if err != nil {
 		t.Fatalf("unable to cancel HTLC: %v", err)
 	}
@@ -4090,7 +4090,7 @@ func TestLockedInHtlcForwardingSkipAfterRestart(t *testing.T) {
 
 	// With both nodes restarted, Bob will now attempt to cancel one of
 	// Alice's HTLC's.
-	err = bobChannel.FailHTLC(htlc2.ID, []byte("failreason"))
+	err = bobChannel.FailHTLC(htlc2.ID, []byte("failreason"), nil, nil)
 	if err != nil {
 		t.Fatalf("unable to cancel HTLC: %v", err)
 	}
