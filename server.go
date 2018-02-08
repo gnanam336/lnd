@@ -156,10 +156,11 @@ func newServer(listenAddrs []string, chanDB *channeldb.DB, cc *chainControl,
 	serializedPubKey := privKey.PubKey().SerializeCompressed()
 
 	routerDir := filepath.Dir(chanDB.Path())
+	sharedSecretPath := filepath.Join(routerDir, "sharedsecrets.db")
 
 	sphinxProcessor := htlcswitch.NewOnionProcessor(
-		sphinx.NewRouter(routerDir, privKey, activeNetParams.Params,
-			cc.chainNotifier))
+		sphinx.NewRouter(sharedSecretPath, privKey,
+			activeNetParams.Params, cc.chainNotifier))
 
 	s := &server{
 		chanDB: chanDB,
