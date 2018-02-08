@@ -5,6 +5,7 @@ import (
 	"io"
 
 	"github.com/lightningnetwork/lightning-onion"
+	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/lnwire"
 )
 
@@ -34,6 +35,12 @@ type htlcPacket struct {
 	// outgoingHTLCID is the ID of the HTLC that we offered to the peer on the
 	// outgoing channel.
 	outgoingHTLCID uint64
+
+	// sourceRef...
+	sourceRef *channeldb.FwdRef
+
+	// destRef...
+	destRef *channeldb.RemoteFwdRef
 
 	// amount is the value of the HTLC that is being created or modified.
 	amount lnwire.MilliSatoshi
