@@ -330,7 +330,7 @@ func (lc *LightningChannel) PayDescsFromRemoteLogUpdates(
 		// For HTLC's we we're offered we'll fetch the original offered HTLc
 		// from the remote party's update log so we can retrieve the same
 		// PaymentDescriptor that SettleHTLC would produce.
-		case *lnwire.UpdateFufillHTLC:
+		case *lnwire.UpdateFulfillHTLC:
 			ogHTLC := lc.remoteUpdateLog.lookupHtlc(wireMsg.ID)
 
 			pd = &PaymentDescriptor{
@@ -3908,7 +3908,7 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 			addUpdates = append(addUpdates, logUpdate)
 
 		case Settle:
-			logUpdate.UpdateMsg = &lnwire.UpdateFufillHTLC{
+			logUpdate.UpdateMsg = &lnwire.UpdateFulfillHTLC{
 				ChanID:          chanID,
 				ID:              pd.ParentIndex,
 				PaymentPreimage: pd.RPreimage,
