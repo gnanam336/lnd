@@ -746,7 +746,7 @@ out:
 				break out
 			}
 
-		case <-batchTick:
+		case <-batchTimer.C:
 			// If the current batch is empty, then we have no work
 			// here.
 			if l.batchCounter == 0 {
@@ -1624,7 +1624,7 @@ func (l *channelLink) processLockedInHtlcs(fwdPkg *channeldb.FwdPkg,
 
 					// HTLC was successfully settled locally send
 					// notification about it remote peer.
-					l.cfg.Peer.SendMessage(&lnwire.UpdateFufillHTLC{
+					l.cfg.Peer.SendMessage(&lnwire.UpdateFulfillHTLC{
 						ChanID:          l.ChanID(),
 						ID:              pd.HtlcIndex,
 						PaymentPreimage: preimage,
@@ -1666,21 +1666,29 @@ func (l *channelLink) processLockedInHtlcs(fwdPkg *channeldb.FwdPkg,
 					continue
 				}
 
-				/*
-					// If this invoice has already been settled,
-					// then we'll reject it as we don't allow an
-					// invoice to be paid twice.
-					if invoice.Terms.Settled == true {
-						log.Warnf("Rejecting duplicate "+
-							"payment for hash=%x", pd.RHash[:])
-						failure := lnwire.FailUnknownPaymentHash{}
-						l.sendHTLCError(
-							pd.HtlcIndex, failure, obfuscator,
-						)
-						needUpdate = true
-						continue
-					}
-				*/
+				// If the invoice is already settled, we choose
+				// to accept the payment to simplify failure
+				// recovery.
+				//
+				// NOTE: Though our recovery and forwarding logic is
+				// predominately batched, settling invoices
+				// happens iteratively. We may reject one of of
+				// two payments for the same rhash at first, but
+				// then restart and settle both after seeing
+				// that the invoice has been settled. Without
+				// any record of which one settles first, it is
+				// ambiguous as to which one actually settled
+				// the invoice. Thus, by accepting all payments,
+				// we eliminate the race condition that can lead
+				// to this inconsistency. Since settles can be
+				//
+				// TODO(conner): track ownership of settlements
+				// to properly recover from failures? or add
+				// batch invoice settlement
+				if invoice.Terms.Settled {
+					log.Warnf("Accepting duplicate "+
+						"payment for hash=%x", pd.RHash[:])
+				}
 
 				// If we're not currently in debug mode, and
 				// the extended htlc doesn't meet the value
@@ -1793,7 +1801,7 @@ func (l *channelLink) processLockedInHtlcs(fwdPkg *channeldb.FwdPkg,
 
 				// HTLC was successfully settled locally send
 				// notification about it remote peer.
-				l.cfg.Peer.SendMessage(&lnwire.UpdateFufillHTLC{
+				l.cfg.Peer.SendMessage(&lnwire.UpdateFulfillHTLC{
 					ChanID:          l.ChanID(),
 					ID:              pd.HtlcIndex,
 					PaymentPreimage: preimage,
