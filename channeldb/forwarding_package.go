@@ -140,9 +140,14 @@ func (f *FwdPkg) String() string {
 }
 
 type FwdRef struct {
-	Source lnwire.ShortChannelID
 	Height uint64
 	Index  uint16
+}
+
+type RemoteFwdRef struct {
+	FwdRef
+
+	Source lnwire.ShortChannelID
 }
 
 type FwdPackager interface {
@@ -150,7 +155,8 @@ type FwdPackager interface {
 	LoadFwdPkg(*bolt.Tx, uint64) (*FwdPkg, error)
 	LoadFwdPkgs(*bolt.Tx) ([]*FwdPkg, error)
 	FilterFwdPkg(*bolt.Tx, uint64, map[uint16]struct{}) error
-	RemoveHtlc(*bolt.Tx, *FwdRef) error
+	AckAddHtlcs(*bolt.Tx, ...FwdRef) error
+	RemoveHtlcs(*bolt.Tx, ...RemoteFwdRef) error
 	RemovePkg(*bolt.Tx, uint64) error
 }
 
@@ -398,45 +404,141 @@ func (p *Packager) FilterFwdPkg(tx *bolt.Tx, height uint64,
 	return heightBkt.Put(forwardedAddsKey, forwardedAddsBytes)
 }
 
-func (*Packager) RemoveHtlc(tx *bolt.Tx, ref *FwdRef) error {
-	/*
-		if ref == nil {
-			return nil
-		}
+func (p *Packager) AckAddHtlcs(tx *bolt.Tx, addRefs ...FwdRef) error {
+	if len(addRefs) == 0 {
+		return nil
+	}
 
-		fwdPkgBkt := tx.Bucket(fwdPackagesKey)
-		if fwdPkgBkt == nil {
-			return nil
-		}
+	fwdPkgBkt := tx.Bucket(fwdPackagesKey)
+	if fwdPkgBkt == nil {
+		return ErrCorruptedFwdPkg
+	}
 
-		source := makeLogKey(ref.Source.ToUint64())
-		sourceBkt := fwdPkgBkt.Bucket(source[:])
-		if sourceBkt == nil {
-			return nil
-		}
+	sourceKey := makeLogKey(p.source.ToUint64())
+	sourceBkt := fwdPkgBkt.Bucket(sourceKey[:])
+	if sourceBkt == nil {
+		return nil
+	}
 
-		heightKey := makeLogKey(ref.Height)
-		heightBkt := sourceBkt.Bucket(heightKey[:])
-		if heightBkt == nil {
-			return nil
+	// Organize the forward references such that we just get a single slice
+	// of indexes for each unique height.
+	var heightDiffs = make(map[uint64][]uint16)
+	for _, addRef := range addRefs {
+		if indexes, ok := heightDiffs[addRef.Height]; ok {
+			indexes = append(indexes, addRef.Index)
+		} else {
+			heightDiffs[addRef.Height] = []uint16{addRef.Index}
 		}
+	}
 
-		htlcBkt := heightBkt.Bucket(htlcBucketKey)
-		if htlcBkt == nil {
-			return nil
-		}
-
-		logIdxKey := uint16Key(ref.Index)
-		if err := htlcBkt.Delete(logIdxKey); err != nil {
+	for height, indexes := range heightDiffs {
+		err := ackAddHtlcsAtHeight(sourceBkt, height, indexes)
+		if err != nil {
 			return err
 		}
+	}
 
-		if err := isBucketEmpty(htlcBkt); err != nil {
+	return nil
+}
+
+func ackAddHtlcsAtHeight(sourceBkt *bolt.Bucket, height uint64,
+	indexes []uint16) error {
+
+	heightKey := makeLogKey(height)
+	heightBkt := sourceBkt.Bucket(heightKey[:])
+	if heightBkt == nil {
+		return nil
+	}
+
+	// Load ack filter from disk.
+	ackFilterBytes := heightBkt.Get(ackFilterKey)
+	if ackFilterBytes == nil {
+		return ErrCorruptedFwdPkg
+	}
+
+	ackFilter := &PkgFilter{}
+	ackFilterReader := bytes.NewReader(ackFilterBytes)
+	if err := ackFilter.Decode(ackFilterReader); err != nil {
+		return err
+	}
+
+	// Update the ack filter for this height.
+	for _, index := range indexes {
+		ackFilter.Set(index)
+	}
+
+	// Write the resulting filter to disk.
+	var ackFilterBuf bytes.Buffer
+	if err := ackFilter.Encode(&ackFilterBuf); err != nil {
+		return err
+	}
+
+	return heightBkt.Put(ackFilterKey, ackFilterBuf.Bytes())
+}
+
+func (*Packager) RemoveHtlcs(tx *bolt.Tx, settleFailRefs ...RemoteFwdRef) error {
+	if len(settleFailRefs) == 0 {
+		return nil
+	}
+
+	fwdPkgBkt := tx.Bucket(fwdPackagesKey)
+	if fwdPkgBkt == nil {
+		return ErrCorruptedFwdPkg
+	}
+
+	// Organize the forward references such that we just get a single slice
+	// of indexes for each unique height.
+	var destHeightDiffs = make(map[lnwire.ShortChannelID]map[uint64][]uint16)
+	for _, settleFailRef := range settleFailRefs {
+		destHeights, ok := destHeightDiffs[settleFailRef.Source]
+		if !ok {
+			destHeights = make(map[uint64][]uint16)
+			destHeightDiffs[settleFailRef.Source] = destHeights
+		}
+
+		if heightIndexes, ok := destHeights[settleFailRef.Height]; ok {
+			heightIndexes = append(heightIndexes,
+				settleFailRef.Index)
+		} else {
+			destHeights[settleFailRef.Height] =
+				[]uint16{settleFailRef.Index}
+		}
+	}
+
+	for dest, destHeights := range destHeightDiffs {
+		destKey := makeLogKey(dest.ToUint64())
+		destBkt := fwdPkgBkt.Bucket(destKey[:])
+		if destBkt == nil {
 			return nil
 		}
 
-		return fwdPkgBkt.Delete(htlcBucketKey)
-	*/
+		for height, indexes := range destHeights {
+			err := removeHtlcsAtHeight(destBkt, height, indexes)
+			if err != nil {
+				return err
+			}
+		}
+
+	}
+
+	return nil
+}
+
+func removeHtlcsAtHeight(destBkt *bolt.Bucket, height uint64,
+	indexes []uint16) error {
+
+	heightKey := makeLogKey(height)
+	heightBkt := destBkt.Bucket(heightKey[:])
+	if heightBkt == nil {
+		return nil
+	}
+
+	// Update the ack filter for this height.
+	for _, index := range indexes {
+		if err := heightBkt.Delete(uint16Key(index)); err != nil {
+			return err
+		}
+	}
 
 	return nil
 }
