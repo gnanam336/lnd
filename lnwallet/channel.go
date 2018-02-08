@@ -209,6 +209,10 @@ type PaymentDescriptor struct {
 	// Settle.
 	ParentIndex uint64
 
+	SourceRef *channeldb.FwdRef
+
+	DestRef *channeldb.RemoteFwdRef
+
 	// localOutputIndex is the output index of this HTLc output in the
 	// commitment transaction of the local node.
 	//
@@ -2644,11 +2648,16 @@ func (lc *LightningChannel) createCommitDiff(
 		})
 	}
 
+	var (
+		ackAddRefs []channeldb.FwdRef
+
+		settleFailRefs []channeldb.RemoteFwdRef
+	)
+
 	// We'll now run through our local update log to locate the items which
 	// were only just committed within this pending state. This will be the
 	// set of items we need to retransmit if we reconnect and find that
 	// they didn't process this new state fully.
-	var removeParents []uint64
 	for e := lc.localUpdateLog.Front(); e != nil; e = e.Next() {
 		pd := e.Value.(*PaymentDescriptor)
 
@@ -2684,13 +2693,16 @@ func (lc *LightningChannel) createCommitDiff(
 			copy(htlc.OnionBlob[:], pd.OnionBlob)
 			logUpdate.UpdateMsg = htlc
 
+			logUpdates = append(logUpdates, logUpdate)
+
+			continue
+
 		case Settle:
 			logUpdate.UpdateMsg = &lnwire.UpdateFulfillHTLC{
 				ChanID:          chanID,
 				ID:              pd.ParentIndex,
 				PaymentPreimage: pd.RPreimage,
 			}
-			removeParents = append(removeParents, pd.ParentIndex)
 
 		case Fail:
 			logUpdate.UpdateMsg = &lnwire.UpdateFailHTLC{
@@ -2698,7 +2710,6 @@ func (lc *LightningChannel) createCommitDiff(
 				ID:     pd.ParentIndex,
 				Reason: pd.FailReason,
 			}
-			removeParents = append(removeParents, pd.ParentIndex)
 
 		case MalformedFail:
 			logUpdate.UpdateMsg = &lnwire.UpdateFailMalformedHTLC{
@@ -2707,7 +2718,15 @@ func (lc *LightningChannel) createCommitDiff(
 				ShaOnionBlob: pd.ShaOnionBlob,
 				FailureCode:  pd.FailCode,
 			}
-			removeParents = append(removeParents, pd.ParentIndex)
+		}
+
+		// Gather the fwd pkg references from any settle or fail
+		// packets, if they exist.
+		if pd.SourceRef != nil {
+			ackAddRefs = append(ackAddRefs, *pd.SourceRef)
+		}
+		if pd.DestRef != nil {
+			settleFailRefs = append(settleFailRefs, *pd.DestRef)
 		}
 
 		logUpdates = append(logUpdates, logUpdate)
@@ -2729,8 +2748,9 @@ func (lc *LightningChannel) createCommitDiff(
 			CommitSig: commitSig,
 			HtlcSigs:  htlcSigs,
 		},
-		LogUpdates: logUpdates,
-		//RemoveParents: removeParents,
+		LogUpdates:     logUpdates,
+		AckAddRefs:     ackAddRefs,
+		SettleFailRefs: settleFailRefs,
 	}, nil
 }
 
@@ -3813,6 +3833,7 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 		settleFailUpdates    []channeldb.LogUpdate
 	)
 
+	var addIndex, settleFailIndex uint16
 	for e := lc.remoteUpdateLog.Front(); e != nil; e = e.Next() {
 		pd := e.Value.(*PaymentDescriptor)
 
@@ -3835,11 +3856,26 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 			remoteChainTail == pd.addCommitHeightRemote &&
 			localChainTail >= pd.addCommitHeightLocal {
 
+			pd.SourceRef = &channeldb.FwdRef{
+				Height: remoteChainTail,
+				Index:  addIndex,
+			}
+			addIndex++
+
 			pd.isForwarded = true
 			addsToForward = append(addsToForward, pd)
 		} else if pd.EntryType != Add &&
 			remoteChainTail >= pd.removeCommitHeightRemote &&
 			localChainTail >= pd.removeCommitHeightLocal {
+
+			pd.DestRef = &channeldb.RemoteFwdRef{
+				Source: lc.ShortChanID(),
+				FwdRef: channeldb.FwdRef{
+					Height: remoteChainTail,
+					Index:  settleFailIndex,
+				},
+			}
+			settleFailIndex++
 
 			pd.isForwarded = true
 			settleFailsToForward = append(settleFailsToForward, pd)
@@ -3901,8 +3937,8 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 	source := lc.channelState.ShortChanID
 	remoteHeight := lc.channelState.RemoteCommitment.CommitHeight
 
-	fwdPkg := channeldb.NewFwdPkg(source, remoteChainTail, addUpdates,
-		settleFailUpdates)
+	fwdPkg := channeldb.NewFwdPkg(
+		source, remoteChainTail, addUpdates, settleFailUpdates)
 
 	walletLog.Infof("Revoking commit height: %d", remoteHeight)
 
@@ -3972,6 +4008,7 @@ func (lc *LightningChannel) InitNextRevocation(revKey *btcec.PublicKey) error {
 // AddHTLC adds an HTLC to the state machine's local update log. This method
 // should be called when preparing to send an outgoing HTLC.
 func (lc *LightningChannel) AddHTLC(htlc *lnwire.UpdateAddHTLC) (uint64, error) {
+
 	lc.Lock()
 	defer lc.Unlock()
 
@@ -4031,7 +4068,8 @@ func (lc *LightningChannel) ReceiveHTLC(htlc *lnwire.UpdateAddHTLC) (uint64, err
 // is invalid, an error is returned. Additionally, the value of the settled
 // HTLC is also returned.
 func (lc *LightningChannel) SettleHTLC(preimage [32]byte,
-	htlcIndex uint64) error {
+	htlcIndex uint64, sourceRef *channeldb.FwdRef,
+	destRef *channeldb.RemoteFwdRef) error {
 
 	lc.Lock()
 	defer lc.Unlock()
@@ -4053,6 +4091,8 @@ func (lc *LightningChannel) SettleHTLC(preimage [32]byte,
 		LogIndex:    lc.localUpdateLog.logIndex,
 		ParentIndex: htlcIndex,
 		EntryType:   Settle,
+		SourceRef:   sourceRef,
+		DestRef:     destRef,
 	}
 
 	lc.localUpdateLog.appendUpdate(pd)
@@ -4096,7 +4136,9 @@ func (lc *LightningChannel) ReceiveHTLCSettle(preimage [32]byte, htlcIndex uint6
 // entry which will remove the target log entry within the next commitment
 // update. This method is intended to be called in order to cancel in
 // _incoming_ HTLC.
-func (lc *LightningChannel) FailHTLC(htlcIndex uint64, reason []byte) error {
+func (lc *LightningChannel) FailHTLC(htlcIndex uint64, reason []byte,
+	sourceRef *channeldb.FwdRef, destRef *channeldb.RemoteFwdRef) error {
+
 	lc.Lock()
 	defer lc.Unlock()
 
@@ -4113,6 +4155,8 @@ func (lc *LightningChannel) FailHTLC(htlcIndex uint64, reason []byte) error {
 		LogIndex:    lc.localUpdateLog.logIndex,
 		EntryType:   Fail,
 		FailReason:  reason,
+		SourceRef:   sourceRef,
+		DestRef:     destRef,
 	}
 
 	lc.localUpdateLog.appendUpdate(pd)
@@ -4125,7 +4169,8 @@ func (lc *LightningChannel) FailHTLC(htlcIndex uint64, reason []byte) error {
 // commitment update. This method is intended to be called in order to cancel
 // in _incoming_ HTLC.
 func (lc *LightningChannel) MalformedFailHTLC(htlcIndex uint64,
-	failCode lnwire.FailCode, shaOnionBlob [sha256.Size]byte) error {
+	failCode lnwire.FailCode, shaOnionBlob [sha256.Size]byte,
+	sourceRef *channeldb.FwdRef) error {
 
 	lc.Lock()
 	defer lc.Unlock()
@@ -4144,6 +4189,7 @@ func (lc *LightningChannel) MalformedFailHTLC(htlcIndex uint64,
 		EntryType:    MalformedFail,
 		FailCode:     failCode,
 		ShaOnionBlob: shaOnionBlob,
+		SourceRef:    sourceRef,
 	}
 
 	lc.localUpdateLog.appendUpdate(pd)
