@@ -4371,7 +4371,8 @@ func TestDesyncHTLCs(t *testing.T) {
 	}
 
 	// Now let let Bob fail this HTLC.
-	if err := bobChannel.FailHTLC(bobIndex, []byte("failreason")); err != nil {
+	err = bobChannel.FailHTLC(bobIndex, []byte("failreason"), nil, nil)
+	if err != nil {
 		t.Fatalf("unable to cancel HTLC: %v", err)
 	}
 	if err := aliceChannel.ReceiveFailHTLC(aliceIndex, []byte("bad")); err != nil {
