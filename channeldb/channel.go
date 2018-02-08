@@ -877,6 +877,12 @@ type CommitDiff struct {
 	// within this message should properly cover the new commitment state
 	// and also the HTLC's within the new commitment state.
 	CommitSig *lnwire.CommitSig
+
+	// AckAddRefs...
+	AckAddRefs []FwdRef
+
+	// SettleFailRefs...
+	SettleFailRefs []RemoteFwdRef
 }
 
 func serializeCommitDiff(w io.Writer, diff *CommitDiff) error {
@@ -955,14 +961,12 @@ func (c *OpenChannel) AppendRemoteCommitChain(diff *CommitDiff) error {
 			return err
 		}
 
-		/*
-			for _, htlc := range diff.LogUpdates {
-				err = c.RemoveHtlc(tx, htlc.RemoteFwdRef)
-				if err != nil {
-					return err
-				}
-			}
-		*/
+		if err := c.AckAddHtlcs(tx, diff.AckAddRefs...); err != nil {
+			return err
+		}
+		if err := c.RemoveHtlcs(tx, diff.SettleFailRefs...); err != nil {
+			return err
+		}
 
 		// TODO(roasbeef): use seqno to derive key for later LCP
 
