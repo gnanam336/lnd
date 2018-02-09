@@ -4683,7 +4683,7 @@ func TestChanReserve(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unable to recv htlc: %v", err)
 	}
-	if err := bobChannel.SettleHTLC(preimage, bobHtlcIndex); err != nil {
+	if err := bobChannel.SettleHTLC(preimage, bobHtlcIndex, nil, nil); err != nil {
 		t.Fatalf("bob unable to settle inbound htlc: %v", err)
 	}
 	if err := aliceChannel.ReceiveHTLCSettle(preimage, aliceHtlcIndex); err != nil {
