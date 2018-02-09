@@ -209,9 +209,9 @@ type PaymentDescriptor struct {
 	// Settle.
 	ParentIndex uint64
 
-	SourceRef *channeldb.FwdRef
+	SourceRef *channeldb.AddRef
 
-	DestRef *channeldb.RemoteFwdRef
+	DestRef *channeldb.SettleFailRef
 
 	// localOutputIndex is the output index of this HTLc output in the
 	// commitment transaction of the local node.
@@ -2649,9 +2649,9 @@ func (lc *LightningChannel) createCommitDiff(
 	}
 
 	var (
-		ackAddRefs []channeldb.FwdRef
+		ackAddRefs []channeldb.AddRef
 
-		settleFailRefs []channeldb.RemoteFwdRef
+		settleFailRefs []channeldb.SettleFailRef
 	)
 
 	// We'll now run through our local update log to locate the items which
@@ -3856,7 +3856,7 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 			remoteChainTail == pd.addCommitHeightRemote &&
 			localChainTail >= pd.addCommitHeightLocal {
 
-			pd.SourceRef = &channeldb.FwdRef{
+			pd.SourceRef = &channeldb.AddRef{
 				Height: remoteChainTail,
 				Index:  addIndex,
 			}
@@ -3868,9 +3868,9 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 			remoteChainTail >= pd.removeCommitHeightRemote &&
 			localChainTail >= pd.removeCommitHeightLocal {
 
-			pd.DestRef = &channeldb.RemoteFwdRef{
+			pd.DestRef = &channeldb.SettleFailRef{
 				Source: lc.ShortChanID(),
-				FwdRef: channeldb.FwdRef{
+				AddRef: channeldb.AddRef{
 					Height: remoteChainTail,
 					Index:  settleFailIndex,
 				},
@@ -4068,8 +4068,8 @@ func (lc *LightningChannel) ReceiveHTLC(htlc *lnwire.UpdateAddHTLC) (uint64, err
 // is invalid, an error is returned. Additionally, the value of the settled
 // HTLC is also returned.
 func (lc *LightningChannel) SettleHTLC(preimage [32]byte,
-	htlcIndex uint64, sourceRef *channeldb.FwdRef,
-	destRef *channeldb.RemoteFwdRef) error {
+	htlcIndex uint64, sourceRef *channeldb.AddRef,
+	destRef *channeldb.SettleFailRef) error {
 
 	lc.Lock()
 	defer lc.Unlock()
@@ -4137,7 +4137,7 @@ func (lc *LightningChannel) ReceiveHTLCSettle(preimage [32]byte, htlcIndex uint6
 // update. This method is intended to be called in order to cancel in
 // _incoming_ HTLC.
 func (lc *LightningChannel) FailHTLC(htlcIndex uint64, reason []byte,
-	sourceRef *channeldb.FwdRef, destRef *channeldb.RemoteFwdRef) error {
+	sourceRef *channeldb.AddRef, destRef *channeldb.SettleFailRef) error {
 
 	lc.Lock()
 	defer lc.Unlock()
@@ -4170,7 +4170,7 @@ func (lc *LightningChannel) FailHTLC(htlcIndex uint64, reason []byte,
 // in _incoming_ HTLC.
 func (lc *LightningChannel) MalformedFailHTLC(htlcIndex uint64,
 	failCode lnwire.FailCode, shaOnionBlob [sha256.Size]byte,
-	sourceRef *channeldb.FwdRef) error {
+	sourceRef *channeldb.AddRef) error {
 
 	lc.Lock()
 	defer lc.Unlock()
