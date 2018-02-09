@@ -843,7 +843,7 @@ type LogUpdate struct {
 
 	// RemoteFwdRef indicates the location of the log update held on disk
 	// after receiving a remote revocation.
-	RemoteFwdRef *FwdRef
+	RemoteFwdRef *AddRef
 }
 
 func (l *LogUpdate) Encode(w io.Writer) error {
@@ -879,10 +879,10 @@ type CommitDiff struct {
 	CommitSig *lnwire.CommitSig
 
 	// AckAddRefs...
-	AckAddRefs []FwdRef
+	AckAddRefs []AddRef
 
 	// SettleFailRefs...
-	SettleFailRefs []RemoteFwdRef
+	SettleFailRefs []SettleFailRef
 }
 
 func serializeCommitDiff(w io.Writer, diff *CommitDiff) error {
