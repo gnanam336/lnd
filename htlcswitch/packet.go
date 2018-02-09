@@ -37,10 +37,10 @@ type htlcPacket struct {
 	outgoingHTLCID uint64
 
 	// sourceRef...
-	sourceRef *channeldb.FwdRef
+	sourceRef *channeldb.AddRef
 
 	// destRef...
-	destRef *channeldb.RemoteFwdRef
+	destRef *channeldb.SettleFailRef
 
 	// amount is the value of the HTLC that is being created or modified.
 	amount lnwire.MilliSatoshi
