@@ -2,7 +2,10 @@ package htlcswitch
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/binary"
 	"fmt"
+	"io"
 	"runtime"
 	"strings"
 	"sync"
@@ -1412,7 +1415,14 @@ func newSingleLinkTestHarness(chanAmt, chanReserve btcutil.Amount) (
 		},
 	}
 
-	chanID := lnwire.NewShortChanIDFromInt(4)
+	var chanIDBytes [8]byte
+	if _, err := io.ReadFull(rand.Reader, chanIDBytes[:]); err != nil {
+		return nil, nil, nil, nil, err
+	}
+
+	chanID := lnwire.NewShortChanIDFromInt(
+		binary.BigEndian.Uint64(chanIDBytes[:]))
+
 	aliceChannel, bobChannel, fCleanUp, _, err := createTestChannel(
 		alicePrivKey, bobPrivKey, chanAmt, chanAmt,
 		chanReserve, chanReserve, chanID,
@@ -1423,7 +1433,7 @@ func newSingleLinkTestHarness(chanAmt, chanReserve btcutil.Amount) (
 
 	var (
 		invoiceRegistry = newMockRegistry()
-		decoder         = &mockIteratorDecoder{}
+		decoder         = newMockIteratorDecoder()
 		obfuscator      = newMockObfuscator()
 		alicePeer       = &mockPeer{
 			sentMsgs: make(chan lnwire.Message, 2000),
@@ -1446,7 +1456,7 @@ func newSingleLinkTestHarness(chanAmt, chanReserve btcutil.Amount) (
 	ticker := &mockTicker{t}
 	aliceCfg := ChannelLinkConfig{
 		FwrdingPolicy:      globalPolicy,
-		Peer:               &alicePeer,
+		Peer:               alicePeer,
 		Switch:             New(Config{}),
 		DecodeHopIterator:  decoder.DecodeHopIterator,
 		DecodeHopIterators: decoder.DecodeHopIterators,
@@ -1557,7 +1567,7 @@ func handleStateUpdate(link *channelLink,
 	if !ok {
 		return fmt.Errorf("expected RevokeAndAck got %T", msg)
 	}
-	_, err = remoteChannel.ReceiveRevocation(revoke)
+	_, _, _, err = remoteChannel.ReceiveRevocation(revoke)
 	if err != nil {
 		return fmt.Errorf("unable to recieve "+
 			"revocation: %v", err)
@@ -1611,7 +1621,7 @@ func updateState(batchTick chan time.Time, link *channelLink,
 		return fmt.Errorf("expected RevokeAndAck got %T",
 			msg)
 	}
-	_, err = remoteChannel.ReceiveRevocation(revoke)
+	_, _, _, err = remoteChannel.ReceiveRevocation(revoke)
 	if err != nil {
 		return fmt.Errorf("unable to recieve "+
 			"revocation: %v", err)
@@ -1738,14 +1748,13 @@ func TestChannelLinkBandwidthConsistency(t *testing.T) {
 	if err := updateState(tmr, aliceLink, bobChannel, true); err != nil {
 		t.Fatalf("unable to update state: %v", err)
 	}
-
 	// Locking in the HTLC should not change Alice's bandwidth.
 	assertLinkBandwidth(t, aliceLink, aliceStartingBandwidth-htlcAmt-htlcFee)
 
 	// If we now send in a valid HTLC settle for the prior HTLC we added,
 	// then the bandwidth should remain unchanged as the remote party will
 	// gain additional channel balance.
-	err = bobChannel.SettleHTLC(invoice.Terms.PaymentPreimage, bobIndex)
+	err = bobChannel.SettleHTLC(invoice.Terms.PaymentPreimage, bobIndex, nil, nil)
 	if err != nil {
 		t.Fatalf("unable to settle htlc: %v", err)
 	}
@@ -1809,7 +1818,7 @@ func TestChannelLinkBandwidthConsistency(t *testing.T) {
 	// With that processed, we'll now generate an HTLC fail (sent by the
 	// remote peer) to cancel the HTLC we just added. This should return us
 	// back to the bandwidth of the link right before the HTLC was sent.
-	err = bobChannel.FailHTLC(bobIndex, []byte("nop"))
+	err = bobChannel.FailHTLC(bobIndex, []byte("nop"), nil, nil)
 	if err != nil {
 		t.Fatalf("unable to fail htlc: %v", err)
 	}
@@ -2134,7 +2143,7 @@ func TestChannelLinkBandwidthConsistencyOverflow(t *testing.T) {
 	// will simply transfer over funds to the remote party. However, the
 	// size of the overflow queue should be decreasing
 	for i := 0; i < numOverFlowHTLCs; i++ {
-		err = bobChannel.SettleHTLC(preImages[i], uint64(i))
+		err = bobChannel.SettleHTLC(preImages[i], uint64(i), nil, nil)
 		if err != nil {
 			t.Fatalf("unable to settle htlc: %v", err)
 		}
@@ -2198,7 +2207,7 @@ func TestChannelLinkBandwidthConsistencyOverflow(t *testing.T) {
 // on the channel link reflects the channel reserve that must be kept
 // at all times.
 func TestChannelLinkBandwidthChanReserve(t *testing.T) {
-	t.Parallel()
+	//t.Parallel()
 
 	// First start a link that has a balance greater than it's
 	// channel reserve.
@@ -2282,7 +2291,7 @@ func TestChannelLinkBandwidthChanReserve(t *testing.T) {
 	// If we now send in a valid HTLC settle for the prior HTLC we added,
 	// then the bandwidth should remain unchanged as the remote party will
 	// gain additional channel balance.
-	err = bobChannel.SettleHTLC(invoice.Terms.PaymentPreimage, bobIndex)
+	err = bobChannel.SettleHTLC(invoice.Terms.PaymentPreimage, bobIndex, nil, nil)
 	if err != nil {
 		t.Fatalf("unable to settle htlc: %v", err)
 	}
@@ -2839,7 +2848,7 @@ func TestChannelLinkUpdateCommitFee(t *testing.T) {
 // HTLC. We do this to simplify the processing of settles after restarts or
 // failures, reducing ambiguity when a batch is only partially processed.
 func TestChannelLinkAcceptDuplicatePayment(t *testing.T) {
-	t.Parallel()
+	//t.Parallel()
 
 	// First, we'll create our traditional three hop network. We'll only be
 	// interacting with and asserting the state of two of the end points
