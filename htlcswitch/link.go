@@ -653,6 +653,12 @@ func (l *channelLink) htlcManager() {
 	}
 
 	for _, fwdPkg := range fwdPkgs {
+		if len(fwdPkg.SettleFails) > 0 {
+			settleFails := l.channel.PayDescsFromRemoteLogUpdates(
+				fwdPkg.SettleFails)
+			l.processLockedInSettleFails(settleFails)
+		}
+
 		if fwdPkg.State == channeldb.FwdStateCompleted {
 			continue
 		}
