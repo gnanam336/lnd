@@ -667,8 +667,8 @@ func (l *channelLink) htlcManager() {
 	//   * also need signals when new invoices are added by the
 	//   invoiceRegistry
 
-	batchTimer := time.NewTicker(50 * time.Millisecond)
-	defer batchTimer.Stop()
+	batchTick := l.cfg.BatchTicker.Start()
+	defer l.cfg.BatchTicker.Stop()
 
 	// TODO(roasbeef): fail chan in case of protocol violation
 out:
@@ -746,7 +746,7 @@ out:
 				break out
 			}
 
-		case <-batchTimer.C:
+		case <-batchTick:
 			// If the current batch is empty, then we have no work
 			// here.
 			if l.batchCounter == 0 {
@@ -1680,7 +1680,7 @@ func (l *channelLink) processLockedInHtlcs(fwdPkg *channeldb.FwdPkg,
 				// ambiguous as to which one actually settled
 				// the invoice. Thus, by accepting all payments,
 				// we eliminate the race condition that can lead
-				// to this inconsistency. Since settles can be
+				// to this inconsistency.
 				//
 				// TODO(conner): track ownership of settlements
 				// to properly recover from failures? or add
@@ -2062,7 +2062,7 @@ func (l *channelLink) processLockedInHtlcs(fwdPkg *channeldb.FwdPkg,
 // peer from which HTLC was received.
 func (l *channelLink) sendHTLCError(htlcIndex uint64,
 	failure lnwire.FailureMessage, e ErrorEncrypter,
-	sourceRef *channeldb.FwdRef) {
+	sourceRef *channeldb.AddRef) {
 
 	reason, err := e.EncryptFirstHop(failure)
 	if err != nil {
@@ -2086,7 +2086,7 @@ func (l *channelLink) sendHTLCError(htlcIndex uint64,
 // sendMalformedHTLCError helper function which sends the malformed HTLC update
 // to the payment sender.
 func (l *channelLink) sendMalformedHTLCError(htlcIndex uint64,
-	code lnwire.FailCode, onionBlob []byte, sourceRef *channeldb.FwdRef) {
+	code lnwire.FailCode, onionBlob []byte, sourceRef *channeldb.AddRef) {
 
 	shaOnionBlob := sha256.Sum256(onionBlob)
 	err := l.channel.MalformedFailHTLC(htlcIndex, code, shaOnionBlob, sourceRef)
