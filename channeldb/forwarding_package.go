@@ -139,13 +139,13 @@ func (f *FwdPkg) String() string {
 		f, f.Source, f.Height, len(f.Adds), len(f.SettleFails))
 }
 
-type FwdRef struct {
+type AddRef struct {
 	Height uint64
 	Index  uint16
 }
 
-type RemoteFwdRef struct {
-	FwdRef
+type SettleFailRef struct {
+	AddRef
 
 	Source lnwire.ShortChannelID
 }
@@ -155,8 +155,8 @@ type FwdPackager interface {
 	LoadFwdPkg(*bolt.Tx, uint64) (*FwdPkg, error)
 	LoadFwdPkgs(*bolt.Tx) ([]*FwdPkg, error)
 	FilterFwdPkg(*bolt.Tx, uint64, map[uint16]struct{}) error
-	AckAddHtlcs(*bolt.Tx, ...FwdRef) error
-	RemoveHtlcs(*bolt.Tx, ...RemoteFwdRef) error
+	AckAddHtlcs(*bolt.Tx, ...AddRef) error
+	RemoveHtlcs(*bolt.Tx, ...SettleFailRef) error
 	RemovePkg(*bolt.Tx, uint64) error
 }
 
@@ -404,7 +404,7 @@ func (p *Packager) FilterFwdPkg(tx *bolt.Tx, height uint64,
 	return heightBkt.Put(forwardedAddsKey, forwardedAddsBytes)
 }
 
-func (p *Packager) AckAddHtlcs(tx *bolt.Tx, addRefs ...FwdRef) error {
+func (p *Packager) AckAddHtlcs(tx *bolt.Tx, addRefs ...AddRef) error {
 	if len(addRefs) == 0 {
 		return nil
 	}
@@ -476,7 +476,7 @@ func ackAddHtlcsAtHeight(sourceBkt *bolt.Bucket, height uint64,
 	return heightBkt.Put(ackFilterKey, ackFilterBuf.Bytes())
 }
 
-func (*Packager) RemoveHtlcs(tx *bolt.Tx, settleFailRefs ...RemoteFwdRef) error {
+func (*Packager) RemoveHtlcs(tx *bolt.Tx, settleFailRefs ...SettleFailRef) error {
 	if len(settleFailRefs) == 0 {
 		return nil
 	}
