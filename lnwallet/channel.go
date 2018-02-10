@@ -3870,10 +3870,8 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 
 			pd.DestRef = &channeldb.SettleFailRef{
 				Source: lc.ShortChanID(),
-				AddRef: channeldb.AddRef{
-					Height: remoteChainTail,
-					Index:  settleFailIndex,
-				},
+				Height: remoteChainTail,
+				Index:  settleFailIndex,
 			}
 			settleFailIndex++
 
@@ -3971,10 +3969,14 @@ func (lc *LightningChannel) LoadFwdPkgs() ([]*channeldb.FwdPkg, error) {
 	return lc.channelState.LoadFwdPkgs()
 }
 
-func (lc *LightningChannel) FilterFwdPkg(height uint64,
-	keepLocal map[uint16]struct{}) error {
+func (lc *LightningChannel) SetExportedAdds(height uint64,
+	forwardedAdds map[uint16]struct{}) error {
 
-	return lc.channelState.FilterFwdPkg(height, keepLocal)
+	return lc.channelState.SetExportedAdds(height, forwardedAdds)
+}
+
+func (lc *LightningChannel) RemoveFwdPkg(height uint64) error {
+	return lc.channelState.RemoveFwdPkg(height)
 }
 
 // NextRevocationKey returns the commitment point for the _next_ commitment
