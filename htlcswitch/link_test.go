@@ -1438,7 +1438,7 @@ func newSingleLinkTestHarness(chanAmt, chanReserve btcutil.Amount) (
 	var (
 		invoiceRegistry = newMockRegistry()
 		decoder         = newMockIteratorDecoder()
-		obfuscator      = newMockObfuscator()
+		obfuscator      = NewMockObfuscator()
 		alicePeer       = &mockPeer{
 			sentMsgs: make(chan lnwire.Message, 2000),
 			quit:     make(chan struct{}),
@@ -1460,7 +1460,7 @@ func newSingleLinkTestHarness(chanAmt, chanReserve btcutil.Amount) (
 
 	aliceSwitch, err := New(Config{DB: aliceDb})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
 	t := make(chan time.Time)
@@ -1682,7 +1682,7 @@ func TestChannelLinkBandwidthConsistency(t *testing.T) {
 
 	// We'll start the test by creating a single instance of
 	const chanAmt = btcutil.SatoshiPerBitcoin * 5
-	link, bobChannel, tmr, cleanUp, err := newSingleLinkTestHarness(chanAmt, 0)
+	aliceLink, bobChannel, tmr, cleanUp, err := newSingleLinkTestHarness(chanAmt, 0)
 	if err != nil {
 		t.Fatalf("unable to create link: %v", err)
 	}
@@ -1695,13 +1695,13 @@ func TestChannelLinkBandwidthConsistency(t *testing.T) {
 		coreLink               = aliceLink.(*channelLink)
 		defaultCommitFee       = coreChan.StateSnapshot().CommitFee
 		aliceStartingBandwidth = aliceLink.Bandwidth()
-		aliceMsgs              = aliceLink.cfg.Peer.(*mockPeer).sentMsgs
+		aliceMsgs              = coreLink.cfg.Peer.(*mockPeer).sentMsgs
 	)
 
 	// We put Alice into HodlHTLC mode, such that she won't settle
 	// incoming HTLCs automatically.
-	aliceLink.cfg.HodlHTLC = true
-	aliceLink.cfg.DebugHTLC = true
+	coreLink.cfg.HodlHTLC = true
+	coreLink.cfg.DebugHTLC = true
 
 	estimator := &lnwallet.StaticFeeEstimator{
 		FeeRate: 24,
@@ -1767,7 +1767,7 @@ func TestChannelLinkBandwidthConsistency(t *testing.T) {
 	}
 
 	// Lock in the HTLC.
-	if err := updateState(tmr, aliceLink, bobChannel, true); err != nil {
+	if err := updateState(tmr, coreLink, bobChannel, true); err != nil {
 		t.Fatalf("unable to update state: %v", err)
 	}
 	// Locking in the HTLC should not change Alice's bandwidth.
@@ -1792,7 +1792,7 @@ func TestChannelLinkBandwidthConsistency(t *testing.T) {
 	assertLinkBandwidth(t, aliceLink, aliceStartingBandwidth-htlcAmt-htlcFee)
 
 	// Lock in the settle.
-	if err := updateState(tmr, aliceLink, bobChannel, false); err != nil {
+	if err := updateState(tmr, coreLink, bobChannel, false); err != nil {
 		t.Fatalf("unable to update state: %v", err)
 	}
 
@@ -1847,7 +1847,7 @@ func TestChannelLinkBandwidthConsistency(t *testing.T) {
 	}
 
 	// Lock in the HTLC, which should not affect the bandwidth.
-	if err := updateState(tmr, aliceLink, bobChannel, true); err != nil {
+	if err := updateState(tmr, coreLink, bobChannel, true); err != nil {
 		t.Fatalf("unable to update state: %v", err)
 	}
 
@@ -1871,7 +1871,7 @@ func TestChannelLinkBandwidthConsistency(t *testing.T) {
 	assertLinkBandwidth(t, aliceLink, aliceStartingBandwidth-htlcAmt*2-htlcFee)
 
 	// Lock in the Fail.
-	if err := updateState(tmr, aliceLink, bobChannel, false); err != nil {
+	if err := updateState(tmr, coreLink, bobChannel, false); err != nil {
 		t.Fatalf("unable to update state: %v", err)
 	}
 
@@ -1888,7 +1888,7 @@ func TestChannelLinkBandwidthConsistency(t *testing.T) {
 	// remain unchanged (but Alice will need to pay the fee for the extra
 	// HTLC).
 	htlcAmt, totalTimelock, hops := generateHops(htlcAmt, testStartingHeight,
-		aliceLink)
+		coreLink)
 	blob, err := generateRoute(hops...)
 	if err != nil {
 		t.Fatalf("unable to gen route: %v", err)
@@ -1901,7 +1901,7 @@ func TestChannelLinkBandwidthConsistency(t *testing.T) {
 
 	// We must add the invoice to the registry, such that Alice expects
 	// this payment.
-	err = aliceLink.cfg.Registry.(*mockInvoiceRegistry).AddInvoice(*invoice)
+	err = coreLink.cfg.Registry.(*mockInvoiceRegistry).AddInvoice(*invoice)
 	if err != nil {
 		t.Fatalf("unable to add invoice to registry: %v", err)
 	}
@@ -1916,7 +1916,7 @@ func TestChannelLinkBandwidthConsistency(t *testing.T) {
 	assertLinkBandwidth(t, aliceLink, aliceStartingBandwidth-htlcAmt)
 
 	// Lock in the HTLC.
-	if err := updateState(tmr, aliceLink, bobChannel, false); err != nil {
+	if err := updateState(tmr, coreLink, bobChannel, false); err != nil {
 		t.Fatalf("unable to update state: %v", err)
 	}
 
@@ -1924,13 +1924,13 @@ func TestChannelLinkBandwidthConsistency(t *testing.T) {
 	assertLinkBandwidth(t, aliceLink, aliceStartingBandwidth-htlcAmt-htlcFee)
 
 	addPkt = htlcPacket{
-		htlc:           updateMsg,
+		htlc:           htlc,
 		incomingChanID: aliceLink.ShortChanID(),
 		incomingHTLCID: 0,
 		obfuscator:     NewMockObfuscator(),
 	}
 
-	circuit = makePaymentCircuit(&updateMsg.PaymentHash, &addPkt)
+	circuit = makePaymentCircuit(&htlc.PaymentHash, &addPkt)
 	_, err = coreLink.cfg.Switch.commitCircuits(&circuit)
 	if err != nil {
 		t.Fatalf("unable to commit circuit: %v", err)
@@ -1977,7 +1977,7 @@ func TestChannelLinkBandwidthConsistency(t *testing.T) {
 	// Finally, we'll test the scenario of failing an HTLC received by the
 	// remote node. This should result in no perceived bandwidth changes.
 	htlcAmt, totalTimelock, hops = generateHops(htlcAmt, testStartingHeight,
-		aliceLink)
+		coreLink)
 	blob, err = generateRoute(hops...)
 	if err != nil {
 		t.Fatalf("unable to gen route: %v", err)
@@ -1986,7 +1986,8 @@ func TestChannelLinkBandwidthConsistency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unable to create payment: %v", err)
 	}
-	if err := aliceLink.cfg.Registry.(*mockInvoiceRegistry).AddInvoice(*invoice); err != nil {
+	err = coreLink.cfg.Registry.(*mockInvoiceRegistry).AddInvoice(*invoice)
+	if err != nil {
 		t.Fatalf("unable to add invoice to registry: %v", err)
 	}
 
@@ -2004,7 +2005,7 @@ func TestChannelLinkBandwidthConsistency(t *testing.T) {
 
 	// No changes before the HTLC is locked in.
 	assertLinkBandwidth(t, aliceLink, aliceStartingBandwidth)
-	if err := updateState(tmr, aliceLink, bobChannel, false); err != nil {
+	if err := updateState(tmr, coreLink, bobChannel, false); err != nil {
 		t.Fatalf("unable to update state: %v", err)
 	}
 
@@ -2012,13 +2013,13 @@ func TestChannelLinkBandwidthConsistency(t *testing.T) {
 	assertLinkBandwidth(t, aliceLink, aliceStartingBandwidth-htlcFee)
 
 	addPkt = htlcPacket{
-		htlc:           htlcAdd,
+		htlc:           htlc,
 		incomingChanID: aliceLink.ShortChanID(),
 		incomingHTLCID: 1,
 		obfuscator:     NewMockObfuscator(),
 	}
 
-	circuit = makePaymentCircuit(&htlcAdd.PaymentHash, &addPkt)
+	circuit = makePaymentCircuit(&htlc.PaymentHash, &addPkt)
 	_, err = coreLink.cfg.Switch.commitCircuits(&circuit)
 	if err != nil {
 		t.Fatalf("unable to commit circuit: %v", err)
@@ -2070,7 +2071,7 @@ func TestChannelLinkBandwidthConsistency(t *testing.T) {
 
 	// After failing an HTLC, the link will automatically trigger
 	// a state update.
-	if err := handleStateUpdate(aliceLink, bobChannel); err != nil {
+	if err := handleStateUpdate(coreLink, bobChannel); err != nil {
 		t.Fatalf("unable to update state: %v", err)
 	}
 	assertLinkBandwidth(t, aliceLink, aliceStartingBandwidth)
@@ -2175,7 +2176,7 @@ func TestChannelLinkBandwidthConsistencyOverflow(t *testing.T) {
 	htlcFee := lnwire.NewMSatFromSatoshis(
 		btcutil.Amount((int64(feePerKw) * commitWeight) / 1000),
 	)
-	expectedBandwidth = aliceStartingBandwidth - totalHtlcAmt - htlcFee
+	expectedBandwidth := aliceStartingBandwidth - totalHtlcAmt - htlcFee
 	expectedBandwidth += lnwire.NewMSatFromSatoshis(defaultCommitFee)
 	assertLinkBandwidth(t, aliceLink, expectedBandwidth)
 
