@@ -16,6 +16,7 @@ type FwdState byte
 const (
 	FwdStateLockedIn FwdState = iota
 	FwdStateProcessed
+	FwdStateFullyAcked
 	FwdStateCompleted
 )
 
@@ -106,10 +107,10 @@ type FwdPkg struct {
 	Source lnwire.ShortChannelID
 	Height uint64
 
-	State         FwdState
-	Adds          []LogUpdate
-	ForwardedAdds map[uint16]struct{}
-	AckFilter     *PkgFilter
+	State        FwdState
+	Adds         []LogUpdate
+	ExportedAdds map[uint16]struct{}
+	AckFilter    *PkgFilter
 
 	SettleFails []LogUpdate
 }
@@ -145,16 +146,16 @@ type AddRef struct {
 }
 
 type SettleFailRef struct {
-	AddRef
-
 	Source lnwire.ShortChannelID
+	Height uint64
+	Index  uint16
 }
 
 type FwdPackager interface {
 	AddFwdPkg(*bolt.Tx, *FwdPkg) error
 	LoadFwdPkg(*bolt.Tx, uint64) (*FwdPkg, error)
 	LoadFwdPkgs(*bolt.Tx) ([]*FwdPkg, error)
-	FilterFwdPkg(*bolt.Tx, uint64, map[uint16]struct{}) error
+	SetExportedAdds(*bolt.Tx, uint64, map[uint16]struct{}) error
 	AckAddHtlcs(*bolt.Tx, ...AddRef) error
 	RemoveHtlcs(*bolt.Tx, ...SettleFailRef) error
 	RemovePkg(*bolt.Tx, uint64) error
@@ -284,34 +285,49 @@ func (p *Packager) loadFwdPkg(fwdPkgBkt *bolt.Bucket, height uint64) (*FwdPkg, e
 		return nil, err
 	}
 
+	// Initialize the fwding package, which always starts in the
+	// FwdStateLockedIn. We can determine what state the package was left in
+	// by examining constraints on the information loaded from disk.
 	fwdPkg := &FwdPkg{
 		Source:      p.source,
+		State:       FwdStateLockedIn,
 		Height:      height,
 		Adds:        adds,
 		SettleFails: failSettles,
 		AckFilter:   ackFilter,
 	}
 
-	/*
-		for i := range htlcs {
-			htlcs[i].RemoteFwdRef = &FwdRef{
-				Source: p.source,
-				Height: height,
-				Index:  uint16(i),
-			}
-		}
-	*/
-
-	forwardedAddsBytes := heightBkt.Get(forwardedAddsKey)
-	if forwardedAddsBytes == nil {
-		fwdPkg.State = FwdStateLockedIn
-		fwdPkg.ForwardedAdds = make(map[uint16]struct{})
-	} else {
-		fwdPkg.State = FwdStateProcessed
-		fwdPkg.ForwardedAdds = bytesToUint16Set(forwardedAddsBytes)
+	// Check to see if we have written the set exported filter adds to
+	// disk. If we haven't, processing of this package was never started, or
+	// failed during the last attempt.
+	exportedAddsBytes := heightBkt.Get(forwardedAddsKey)
+	if exportedAddsBytes == nil {
+		fwdPkg.ExportedAdds = make(map[uint16]struct{})
+		return fwdPkg, nil
 	}
 
-	if fwdPkg.AckFilter.IsFull() {
+	// Otherwise, a complete round of processing was completed, and we
+	// advance the package to FwdStateProcessed.
+	fwdPkg.ExportedAdds = bytesToUint16Set(exportedAddsBytes)
+	fwdPkg.State = FwdStateProcessed
+
+	// If not every add has been acked in this package, we still need to
+	// reprocess it in order to make sure the unacked adds get added to the
+	// switch or go back to the remote peer. Indexes already in the ack
+	// filter will be ignored during reprocessing.
+	if !fwdPkg.AckFilter.IsFull() {
+		return fwdPkg, nil
+	}
+
+	// Otherwise, all adds have been acknowledged.
+	fwdPkg.State = FwdStateFullyAcked
+
+	// If every add has been acked, it is safe to remove this package iff
+	// all other settles and fails that originate from it have also been
+	// added to an outgoing commit txn. If so, we advance the pkg to
+	// FwdStateCompleted to signal that it can be removed from disk
+	// entirely.
+	if len(fwdPkg.SettleFails) == 0 {
 		fwdPkg.State = FwdStateCompleted
 	}
 
@@ -374,7 +390,14 @@ func loadHtlcs(bkt *bolt.Bucket) ([]LogUpdate, error) {
 	return htlcs, nil
 }
 
-func (p *Packager) FilterFwdPkg(tx *bolt.Tx, height uint64,
+// SetExportedAdds writes the set of indexes corresponding to Adds at the
+// `height` that are to be forwarded to the switch. Calling this method causes
+// the forwarding package at `height` to be in FwdStateProcessed. We write this
+// forwarding decision so that we always arrive at the same behavior for HTLCs
+// leaving this channel. After a restart, we skip validation of these Adds,
+// since they are assumed to have already been validated, and make the switch or
+// outgoing link responsible for handling replays.
+func (p *Packager) SetExportedAdds(tx *bolt.Tx, height uint64,
 	forwardedAdds map[uint16]struct{}) error {
 
 	fwdPkgBkt := tx.Bucket(fwdPackagesKey)
@@ -544,52 +567,14 @@ func removeHtlcsAtHeight(destBkt *bolt.Bucket, height uint64,
 }
 
 func (p *Packager) RemovePkg(tx *bolt.Tx, height uint64) error {
+	fwdPkgBkt := tx.Bucket(fwdPackagesKey)
+	if fwdPkgBkt == nil {
+		return nil
+	}
 
-	/*
-		fwdPkgBkt := tx.Bucket(fwdPackagesKey)
-		if fwdPkgBkt == nil {
-			return nil
-		}
+	sourceBytes := makeLogKey(p.source.ToUint64())
 
-		sourceBytes := makeLogKey(p.source.ToUint64())
-		sourceBkt := fwdPkgBkt.Bucket(sourceBytes[:])
-		if sourceBkt == nil {
-			return nil
-		}
-
-		heightKey := makeLogKey(height)
-		heightBkt := sourceBkt.Bucket(heightKey[:])
-		if heightBkt == nil {
-			return nil
-		}
-
-		htlcBkt := heightBkt.Bucket(htlcBucketKey)
-		if htlcBkt == nil {
-			return nil
-		}
-
-		if err := isBucketEmpty(htlcBkt); err != nil {
-			return ErrFwdPkgNotEmpty
-		}
-
-		if err := sourceBkt.Delete(heightKey[:]); err != nil {
-			return err
-		}
-
-		err := isBucketEmpty(sourceBkt)
-		switch err {
-		case nil:
-			// fallthrough
-		case errBucketNotEmpty:
-			return nil
-		default:
-			return err
-		}
-
-		return fwdPkgBkt.Delete(sourceBytes[:])
-	*/
-
-	return nil
+	return fwdPkgBkt.Delete(sourceBytes[:])
 }
 
 func putLogUpdate(bkt *bolt.Bucket, idx uint16, htlc *LogUpdate) error {
