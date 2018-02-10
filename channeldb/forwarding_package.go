@@ -42,6 +42,14 @@ func NewPkgFilter(nels int) *PkgFilter {
 	}
 }
 
+func (f *PkgFilter) Count() uint16 {
+	return f.nels
+}
+
+func (f *PkgFilter) Size() uint16 {
+	return (f.nels + 7) / 8
+}
+
 func (f *PkgFilter) Set(i uint16) {
 	byt := i / 8
 	bit := i % 8
@@ -62,15 +70,18 @@ func (f *PkgFilter) Contains(i uint16) bool {
 func (f *PkgFilter) IsFull() bool {
 	rem := f.nels % 8
 	for i, b := range f.filter {
+		// Batch validate all except the last byte, unless there are no
+		// trailing bits.
 		if i < len(f.filter)-1 || rem == 0 {
 			if b != 0xFF {
 				return false
 			}
 		}
 
+		// Otherwise check that the filter contains all remaining bits.
 		for j := uint16(0); j < rem; j++ {
-			shiftedBit := (b >> (7 - j)) & 0x01
-			if shiftedBit != 0x01 {
+			idx := uint16(8*i) + j
+			if !f.Contains(idx) {
 				return false
 			}
 
@@ -95,10 +106,8 @@ func (f *PkgFilter) Decode(r io.Reader) error {
 		return err
 	}
 
-	filterLen := (f.nels + 7) / 8
-	f.filter = make([]byte, filterLen)
-
-	_, err := r.Read(f.filter)
+	f.filter = make([]byte, f.Size())
+	_, err := io.ReadFull(r, f.filter)
 
 	return err
 }
@@ -151,14 +160,26 @@ type SettleFailRef struct {
 	Index  uint16
 }
 
-type FwdPackager interface {
-	AddFwdPkg(*bolt.Tx, *FwdPkg) error
+type FwdPkgReader interface {
 	LoadFwdPkg(*bolt.Tx, uint64) (*FwdPkg, error)
 	LoadFwdPkgs(*bolt.Tx) ([]*FwdPkg, error)
-	SetExportedAdds(*bolt.Tx, uint64, map[uint16]struct{}) error
+}
+
+type FwdPkgWriter interface {
+	AddFwdPkg(*bolt.Tx, *FwdPkg) error
 	AckAddHtlcs(*bolt.Tx, ...AddRef) error
+	SetExportedAdds(*bolt.Tx, uint64, map[uint16]struct{}) error
+}
+
+type FwdPkgRemover interface {
 	RemoveHtlcs(*bolt.Tx, ...SettleFailRef) error
 	RemovePkg(*bolt.Tx, uint64) error
+}
+
+type FwdPackager interface {
+	FwdPkgReader
+	FwdPkgWriter
+	FwdPkgRemover
 }
 
 type Packager struct {
@@ -334,6 +355,9 @@ func (p *Packager) loadFwdPkg(fwdPkgBkt *bolt.Bucket, height uint64) (*FwdPkg, e
 	return fwdPkg, nil
 }
 
+// LoadFwdPkgs scans the forwarding log for any packages that haven't been
+// processed, and returns their deserialized log updates in map indexed by the
+// remote commitment height at which the updates were locked in.
 func (p *Packager) LoadFwdPkgs(tx *bolt.Tx) ([]*FwdPkg, error) {
 	fwdPkgBkt := tx.Bucket(fwdPackagesKey)
 	if fwdPkgBkt == nil {
