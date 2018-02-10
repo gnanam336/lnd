@@ -268,6 +268,7 @@ func createTestChannel(alicePrivKey, bobPrivKey []byte,
 		RemoteCommitment:        aliceCommit,
 		ShortChanID:             chanID,
 		Db:                      dbAlice,
+		Packager:                channeldb.NewPackager(chanID),
 	}
 
 	bobChannelState := &channeldb.OpenChannel{
@@ -285,6 +286,7 @@ func createTestChannel(alicePrivKey, bobPrivKey []byte,
 		RemoteCommitment:        bobCommit,
 		ShortChanID:             chanID,
 		Db:                      dbBob,
+		Packager:                channeldb.NewPackager(chanID),
 	}
 
 	if err := aliceChannelState.SyncPending(bobAddr, broadcastHeight); err != nil {
