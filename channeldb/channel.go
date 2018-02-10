@@ -396,8 +396,6 @@ type OpenChannel struct {
 	// TODO(roasbeef): just need to store local and remote HTLC's?
 
 	sync.RWMutex
-
-	//OperatorStore
 }
 
 // FullSync serializes, and writes to disk the *full* channel state, using
@@ -1879,99 +1877,6 @@ func appendChannelLogEntry(log *bolt.Bucket,
 
 	logEntrykey := makeLogKey(commit.CommitHeight)
 	return log.Put(logEntrykey[:], b.Bytes())
-}
-
-type OperatorStore struct{}
-
-func (o *OperatorStore) LockInHtlcs(bkt *bolt.Bucket, htlcs []LogUpdate) error {
-	for i := range htlcs {
-		if err := o.LockInHtlc(bkt, &htlcs[i]); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (o *OperatorStore) LockInHtlc(bkt *bolt.Bucket, htlc *LogUpdate) error {
-	logKey := makeLogKey(htlc.LogIndex)
-
-	var b bytes.Buffer
-	if err := SerializeLogUpdate(&b, htlc); err != nil {
-		return err
-	}
-
-	return bkt.Put(logKey[:], b.Bytes())
-}
-
-func (o *OperatorStore) LoadLockedInHtlcs(bkt *bolt.Bucket) ([]LogUpdate, error) {
-	var htlcs []LogUpdate
-	if err := bkt.ForEach(func(k, v []byte) error {
-		if len(k) != 8 {
-			return nil
-		}
-
-		index := binary.BigEndian.Uint64(k)
-
-		htlcReader := bytes.NewReader(v)
-		htlc, err := o.deserializeLogUpdate(htlcReader)
-		if err != nil {
-			return err
-		}
-
-		htlc.LogIndex = index
-		htlcs = append(htlcs, htlc)
-
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-
-	return htlcs, nil
-}
-
-func (o *OperatorStore) AckLockedInHtlcs(bkt *bolt.Bucket,
-	htlcs ...LogUpdate) error {
-
-	for i := range htlcs {
-		err := o.AckLockedInHtlc(bkt, htlcs[i].LogIndex)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (o *OperatorStore) AckLockedInHtlcIndexes(bkt *bolt.Bucket,
-	indexes ...uint64) error {
-
-	for _, index := range indexes {
-		err := o.AckLockedInHtlc(bkt, index)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (_ *OperatorStore) AckLockedInHtlc(bkt *bolt.Bucket, index uint64) error {
-	logKey := makeLogKey(index)
-	return bkt.Delete(logKey[:])
-}
-
-func SerializeLogUpdate(w io.Writer, htlc *LogUpdate) error {
-	return writeElement(w, htlc.UpdateMsg)
-}
-
-func (_ *OperatorStore) deserializeLogUpdate(r io.Reader) (LogUpdate, error) {
-	var htlc LogUpdate
-	if err := readElement(r, &htlc.UpdateMsg); err != nil {
-		return LogUpdate{}, err
-	}
-
-	return htlc, nil
 }
 
 func fetchChannelLogEntry(log *bolt.Bucket,
