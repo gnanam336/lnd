@@ -612,6 +612,51 @@ func (l *channelLink) syncChanStates() error {
 	return nil
 }
 
+func (l *channelLink) resolveFwdPkgs() error {
+	fwdPkgs, err := l.channel.LoadFwdPkgs()
+	if err != nil {
+		return err
+	}
+
+	for _, fwdPkg := range fwdPkgs {
+		switch fwdPkg.State {
+
+		// Remove any completed packages to clear up space.
+		case channeldb.FwdStateCompleted:
+			err = l.channel.RemoveFwdPkg(fwdPkg.Height)
+			if err != nil {
+				return err
+			}
+
+		// If the package is fully acked but not completed, it must
+		// still have settles and fails to propagate.
+		case channeldb.FwdStateFullyAcked:
+			settleFails := l.channel.PayDescsFromRemoteLogUpdates(
+				fwdPkg.SettleFails)
+			l.processLockedInSettleFails(settleFails)
+
+		// Otherwise this is a new package or has gone through
+		// processing. We replay this forwarding package to make sure
+		// our local mem state is resurrected and reforward the HTLCs to
+		// the switch.
+		default:
+			// Also forward any settles and fails that have not been
+			// removed from this package.
+			if len(fwdPkg.SettleFails) > 0 {
+				settleFails := l.channel.PayDescsFromRemoteLogUpdates(
+					fwdPkg.SettleFails)
+				l.processLockedInSettleFails(settleFails)
+			}
+
+			adds := l.channel.PayDescsFromRemoteLogUpdates(fwdPkg.Adds)
+			switchPackets, _ := l.processLockedInHtlcs(fwdPkg, adds)
+			l.cfg.Switch.Forward(switchPackets...)
+		}
+	}
+
+	return nil
+}
+
 // htlcManager is the primary goroutine which drives a channel's commitment
 // update state-machine in response to messages received via several channels.
 // This goroutine reads messages from the upstream (remote) peer, and also from
@@ -646,26 +691,9 @@ func (l *channelLink) htlcManager() {
 		}
 	}
 
-	fwdPkgs, err := l.channel.LoadFwdPkgs()
-	if err != nil {
-		l.fail("unable to load previously locked-in htlcs: %v", err)
+	if err := l.resolveFwdPkgs(); err != nil {
+		l.fail("unable to resolve fwd pkgs: %v", err)
 		return
-	}
-
-	for _, fwdPkg := range fwdPkgs {
-		if len(fwdPkg.SettleFails) > 0 {
-			settleFails := l.channel.PayDescsFromRemoteLogUpdates(
-				fwdPkg.SettleFails)
-			l.processLockedInSettleFails(settleFails)
-		}
-
-		if fwdPkg.State == channeldb.FwdStateCompleted {
-			continue
-		}
-
-		adds := l.channel.PayDescsFromRemoteLogUpdates(fwdPkg.Adds)
-		switchPackets, _ := l.processLockedInHtlcs(fwdPkg, adds)
-		l.cfg.Switch.Forward(switchPackets...)
 	}
 
 	// TODO(roasbeef): check to see if able to settle any currently pending
@@ -1821,7 +1849,7 @@ func (l *channelLink) processLockedInHtlcs(fwdPkg *channeldb.FwdPkg,
 			default:
 				switch fwdPkg.State {
 				case channeldb.FwdStateProcessed:
-					if _, ok := fwdPkg.ForwardedAdds[idx]; !ok {
+					if _, ok := fwdPkg.ExportedAdds[idx]; !ok {
 						// This add was not forwarded on
 						// the previous processing
 						// phase, run it through our
@@ -2052,7 +2080,7 @@ func (l *channelLink) processLockedInHtlcs(fwdPkg *channeldb.FwdPkg,
 	// been fully processed.
 	if fwdPkg.State == channeldb.FwdStateLockedIn {
 		glog.Printf("marking fwding package %d as processed", fwdPkg.Height)
-		err := l.channel.FilterFwdPkg(fwdPkg.Height, forwardedAdds)
+		err := l.channel.SetExportedAdds(fwdPkg.Height, forwardedAdds)
 		if err != nil {
 			return nil, false
 		}
