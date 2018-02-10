@@ -841,9 +841,9 @@ type LogUpdate struct {
 	// we're left with a dangling update on restart.
 	UpdateMsg lnwire.Message
 
-	// RemoteFwdRef indicates the location of the log update held on disk
+	// SourceRef indicates the location of the log update held on disk
 	// after receiving a remote revocation.
-	RemoteFwdRef *AddRef
+	SourceRef *AddRef
 }
 
 func (l *LogUpdate) Encode(w io.Writer) error {
@@ -878,10 +878,20 @@ type CommitDiff struct {
 	// and also the HTLC's within the new commitment state.
 	CommitSig *lnwire.CommitSig
 
-	// AckAddRefs...
+	// AckAddRefs is the on-disk location of all Adds received on this
+	// channel, that are to be settled/failed with the application of this
+	// commit diff.
+	// NOTE: This value is not serialized, it is used to atomically mark the
+	// resolution of adds, such that they will not be reprocessed after a
+	// restart.
 	AckAddRefs []AddRef
 
-	// SettleFailRefs...
+	// SettleFailRefs is the location of all Settles or Fails received from
+	// other channels, that are to be deleted with the application of this
+	// commit diff.
+	// NOTE: This value is not serialized, it is used to atomically remove
+	// settles and fails from the forwarding packages of other channels,
+	// such that they will not be reforwarded internally after a restart.
 	SettleFailRefs []SettleFailRef
 }
 
@@ -961,9 +971,20 @@ func (c *OpenChannel) AppendRemoteCommitChain(diff *CommitDiff) error {
 			return err
 		}
 
+		// Any outgoing settles and fails necessarily have a
+		// corresponding adds in this channel's forwarding packages.
+		// Mark all of these as being fully processed in our forwarding
+		// package, which prevents us from reprocessing them after
+		// startup.
 		if err := c.AckAddHtlcs(tx, diff.AckAddRefs...); err != nil {
 			return err
 		}
+
+		// Additionally, we delete from disk any fails or settles that
+		// are persisted in another channel's forwarding package. This
+		// prevents the same fails and settles from being retransmitted
+		// after restarts. The actual fail or settle we will send to the
+		// remote party is now in the commit diff.
 		if err := c.RemoveHtlcs(tx, diff.SettleFailRefs...); err != nil {
 			return err
 		}
@@ -1053,7 +1074,6 @@ func (c *OpenChannel) InsertNextRevocation(revKey *btcec.PublicKey) error {
 // remote party to the revocation log, and promote the current pending
 // commitment to the current remove commitment.
 func (c *OpenChannel) AdvanceCommitChainTail(fwdPkg *FwdPkg) error {
-
 	c.Lock()
 	defer c.Unlock()
 
@@ -1111,25 +1131,12 @@ func (c *OpenChannel) AdvanceCommitChainTail(fwdPkg *FwdPkg) error {
 		if err != nil {
 			return err
 		}
-		//glog.Printf("curr commit height: %v", c.RemoteCommitment.CommitHeight)
-
-		/*
-			for i := range fwdPkg.Htlcs {
-				fwdPkg.Htlcs[i].RemoteFwdRef = &FwdRef{
-					Source: c.ShortChanID,
-					Height: fwdPkg.Height,
-					Index:  uint16(i),
-				}
-			}
-		*/
 
 		if err := c.AddFwdPkg(tx, fwdPkg); err != nil {
 			return err
 		}
 
 		newRemoteCommit = &newCommit.Commitment
-
-		//glog.Printf("new commit height: %v", newRemoteCommit.CommitHeight)
 
 		return nil
 	})
@@ -1161,11 +1168,11 @@ func (c *OpenChannel) LoadFwdPkgs() ([]*FwdPkg, error) {
 	return fwdPkgs, nil
 }
 
-func (c *OpenChannel) FilterFwdPkg(height uint64,
+func (c *OpenChannel) SetExportedAdds(height uint64,
 	keepLocal map[uint16]struct{}) error {
 
 	return c.Db.Update(func(tx *bolt.Tx) error {
-		return c.Packager.FilterFwdPkg(tx, height, keepLocal)
+		return c.Packager.SetExportedAdds(tx, height, keepLocal)
 	})
 }
 
