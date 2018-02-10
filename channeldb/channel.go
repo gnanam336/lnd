@@ -388,7 +388,7 @@ type OpenChannel struct {
 	// implementation of secret store is shachain store.
 	RevocationStore shachain.Store
 
-	Packager
+	Packager FwdPackager
 
 	// TODO(roasbeef): eww
 	Db *DB
@@ -838,10 +838,6 @@ type LogUpdate struct {
 	// update which will be used when restoring our local update log if
 	// we're left with a dangling update on restart.
 	UpdateMsg lnwire.Message
-
-	// SourceRef indicates the location of the log update held on disk
-	// after receiving a remote revocation.
-	SourceRef *AddRef
 }
 
 func (l *LogUpdate) Encode(w io.Writer) error {
@@ -974,7 +970,7 @@ func (c *OpenChannel) AppendRemoteCommitChain(diff *CommitDiff) error {
 		// Mark all of these as being fully processed in our forwarding
 		// package, which prevents us from reprocessing them after
 		// startup.
-		if err := c.AckAddHtlcs(tx, diff.AckAddRefs...); err != nil {
+		if err := c.Packager.AckAddHtlcs(tx, diff.AckAddRefs...); err != nil {
 			return err
 		}
 
@@ -983,7 +979,7 @@ func (c *OpenChannel) AppendRemoteCommitChain(diff *CommitDiff) error {
 		// prevents the same fails and settles from being retransmitted
 		// after restarts. The actual fail or settle we will send to the
 		// remote party is now in the commit diff.
-		if err := c.RemoveHtlcs(tx, diff.SettleFailRefs...); err != nil {
+		if err := c.Packager.RemoveHtlcs(tx, diff.SettleFailRefs...); err != nil {
 			return err
 		}
 
@@ -1130,7 +1126,7 @@ func (c *OpenChannel) AdvanceCommitChainTail(fwdPkg *FwdPkg) error {
 			return err
 		}
 
-		if err := c.AddFwdPkg(tx, fwdPkg); err != nil {
+		if err := c.Packager.AddFwdPkg(tx, fwdPkg); err != nil {
 			return err
 		}
 
@@ -1150,7 +1146,7 @@ func (c *OpenChannel) AdvanceCommitChainTail(fwdPkg *FwdPkg) error {
 	return nil
 }
 
-// LoadLockedInHtlcs scans the forwarding log for any packages that haven't been
+// LoadFwdPkgs scans the forwarding log for any packages that haven't been
 // processed, and returns their deserialized log updates in map indexed by the
 // remote commitment height at which the updates were locked in.
 func (c *OpenChannel) LoadFwdPkgs() ([]*FwdPkg, error) {
@@ -1752,6 +1748,8 @@ func fetchChanInfo(chanBucket *bolt.Bucket, channel *OpenChannel) error {
 	if err := readChanConfig(r, &channel.RemoteChanCfg); err != nil {
 		return err
 	}
+
+	channel.Packager = NewPackager(channel.ShortChanID)
 
 	return nil
 }
