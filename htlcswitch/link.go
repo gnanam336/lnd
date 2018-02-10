@@ -625,25 +625,29 @@ func (l *channelLink) resolveFwdPkgs() error {
 		// still have settles and fails to propagate.
 		case channeldb.FwdStateFullyAcked:
 			settleFails := l.channel.PayDescsFromRemoteLogUpdates(
-				fwdPkg.SettleFails)
-			l.processLockedInSettleFails(settleFails)
+				fwdPkg.SettleFails,
+			)
+			l.processRemoteSettleFails(settleFails)
 
-		// Otherwise this is a new package or has gone through
-		// processing. We replay this forwarding package to make sure
-		// our local mem state is resurrected and reforward the HTLCs to
-		// the switch.
+		// Otherwise this is either a new package or one has gone
+		// through processing, but contains htlcs that need to be
+		// restored in memory. We replay this forwarding package to make
+		// sure our local mem state is resurrected, we mimic any
+		// original responses back to the remote party, and reforward
+		// the relevant HTLCs to the switch.
 		default:
-			// Also forward any settles and fails that have not been
+			// Forward any settles and fails that have not been
 			// removed from this package.
-			if len(fwdPkg.SettleFails) > 0 {
-				settleFails := l.channel.PayDescsFromRemoteLogUpdates(
-					fwdPkg.SettleFails)
-				l.processLockedInSettleFails(settleFails)
-			}
+			settleFails := l.channel.PayDescsFromRemoteLogUpdates(
+				fwdPkg.SettleFails,
+			)
+			l.processRemoteSettleFails(settleFails)
 
-			adds := l.channel.PayDescsFromRemoteLogUpdates(fwdPkg.Adds)
-			switchPackets, _ := l.processLockedInHtlcs(fwdPkg, adds)
-			l.cfg.Switch.Forward(switchPackets...)
+			// And batch replay the adds.
+			adds := l.channel.PayDescsFromRemoteLogUpdates(
+				fwdPkg.Adds,
+			)
+			l.processRemoteAdds(fwdPkg, adds)
 		}
 	}
 
@@ -1191,17 +1195,8 @@ func (l *channelLink) handleUpstreamMsg(msg lnwire.Message) {
 
 		log.Debugf("remote height now at %v", l.channel.RemoteCommitHeight())
 
-		l.processLockedInSettleFails(settleFails)
-
-		switchPackets, needUpdate := l.processLockedInHtlcs(fwdPkg, adds)
-		if needUpdate {
-			if err := l.updateCommitTx(); err != nil {
-				l.fail("unable to update commitment: %v", err)
-				return
-			}
-		}
-
-		l.cfg.Switch.Forward(switchPackets...)
+		l.processRemoteSettleFails(settleFails)
+		l.processRemoteAdds(fwdPkg, adds)
 
 	case *lnwire.UpdateFee:
 		// We received fee update from peer. If we are the initiator we
@@ -1433,7 +1428,10 @@ func (l *channelLink) updateChannelFee(feePerKw btcutil.Amount) error {
 	return l.updateCommitTx()
 }
 
-func (l *channelLink) processLockedInSettleFails(settleFails []*lnwallet.PaymentDescriptor) {
+func (l *channelLink) processRemoteSettleFails(settleFails []*lnwallet.PaymentDescriptor) {
+	if len(settleFails) == 0 {
+		return
+	}
 
 	var switchPackets []*htlcPacket
 	for _, pd := range settleFails {
@@ -1487,13 +1485,13 @@ func (l *channelLink) processLockedInSettleFails(settleFails []*lnwallet.Payment
 	l.cfg.Switch.Forward(switchPackets...)
 }
 
-// processLockedInHtlcs serially processes each of the log updates which have
+// processRemoteAdds serially processes each of the log updates which have
 // been "locked-in". An HTLC is considered locked-in once it has been fully
 // committed to in both the remote and local commitment state. Once a channel
 // updates is locked-in, then it can be acted upon, meaning: settling HTLCs,
 // cancelling them, or forwarding new HTLCs to the next hop.
-func (l *channelLink) processLockedInHtlcs(fwdPkg *channeldb.FwdPkg,
-	lockedInHtlcs []*lnwallet.PaymentDescriptor) ([]*htlcPacket, bool) {
+func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
+	lockedInHtlcs []*lnwallet.PaymentDescriptor) {
 
 	glog.Printf("link: %s fwdpkg: %v", l.ShortChanID(), fwdPkg)
 
@@ -1646,7 +1644,7 @@ func (l *channelLink) processLockedInHtlcs(fwdPkg *channeldb.FwdPkg,
 						pd.SourceRef, nil)
 					if err != nil {
 						l.fail("unable to settle htlc: %v", err)
-						return nil, false
+						return
 					}
 
 					// HTLC was successfully settled locally send
@@ -1814,7 +1812,7 @@ func (l *channelLink) processLockedInHtlcs(fwdPkg *channeldb.FwdPkg,
 					pd.HtlcIndex, pd.SourceRef, nil)
 				if err != nil {
 					l.fail("unable to settle htlc: %v", err)
-					return nil, false
+					return
 				}
 
 				// Notify the invoiceRegistry of the invoices we
@@ -1823,7 +1821,7 @@ func (l *channelLink) processLockedInHtlcs(fwdPkg *channeldb.FwdPkg,
 				err = l.cfg.Registry.SettleInvoice(invoiceHash)
 				if err != nil {
 					l.fail("unable to settle invoice: %v", err)
-					return nil, false
+					return
 				}
 
 				// HTLC was successfully settled locally send
@@ -2003,7 +2001,7 @@ func (l *channelLink) processLockedInHtlcs(fwdPkg *channeldb.FwdPkg,
 					if err != nil {
 						l.fail("unable to create channel update "+
 							"while handling the error: %v", err)
-						return nil, false
+						return
 					}
 
 					failure := lnwire.NewIncorrectCltvExpiry(
@@ -2075,14 +2073,25 @@ func (l *channelLink) processLockedInHtlcs(fwdPkg *channeldb.FwdPkg,
 		glog.Printf("marking fwding package %d as processed", fwdPkg.Height)
 		err := l.channel.SetExportedAdds(fwdPkg.Height, forwardedAdds)
 		if err != nil {
-			return nil, false
+			return
 		}
 		fwdPkg.State = channeldb.FwdStateProcessed
 	}
 
+	if needUpdate {
+		if err := l.updateCommitTx(); err != nil {
+			l.fail("unable to update commitment: %v", err)
+			return
+		}
+	}
+
 	glog.Printf("DONE marking fwding package %d as processed", fwdPkg.Height)
 
-	return switchPackets, needUpdate
+	if len(switchPackets) == 0 {
+		return
+	}
+
+	l.cfg.Switch.Forward(switchPackets...)
 }
 
 // sendHTLCError functions cancels HTLC and send cancel message back to the
