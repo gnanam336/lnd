@@ -530,13 +530,6 @@ func (l *channelLink) syncChanStates() error {
 			"deadline")
 	}
 
-	if l.cfg.DebugHTLC && l.cfg.HodlHTLC {
-		log.Warnf("hodl HTLC mode enabled, " +
-			"will not attempt to settle " +
-			"HTLC with sender")
-		return nil
-	}
-
 	// In order to prep for the fragment below, we'll note if we
 	// retransmitted any HTLC's settles earlier. We'll track them by the
 	// HTLC index of the remote party in order to avoid erroneously sending
