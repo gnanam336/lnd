@@ -70,6 +70,8 @@ var halfCircuitTests = []struct {
 // verify that the various ErrorEncrypter implementations can be properly
 // reconstructed from a serialized half circuit.
 func TestHalfCircuitSerialization(t *testing.T) {
+	t.Parallel()
+
 	for i, test := range halfCircuitTests {
 		circuit := &htlcswitch.PaymentCircuit{
 			PaymentHash:    test.hash,
