@@ -552,6 +552,15 @@ func (f *mockChannelLink) completeCircuit(pkt *htlcPacket) error {
 		}
 
 		f.htlcID++
+
+	case *lnwire.UpdateFulfillHTLC, *lnwire.UpdateFailHTLC:
+		circuit := f.htlcSwitch.lookupClosedCircuit(pkt.inKey())
+		if circuit != nil {
+			err := f.htlcSwitch.teardownCircuit(circuit, pkt)
+			if err != nil {
+				return err
+			}
+		}
 	}
 
 	return nil
