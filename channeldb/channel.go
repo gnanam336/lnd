@@ -1162,11 +1162,11 @@ func (c *OpenChannel) LoadFwdPkgs() ([]*FwdPkg, error) {
 	return fwdPkgs, nil
 }
 
-func (c *OpenChannel) SetExportedAdds(height uint64,
-	keepLocal map[uint16]struct{}) error {
+func (c *OpenChannel) SetFwdFilter(height uint64,
+	fwdFilter *PkgFilter) error {
 
 	return c.Db.Update(func(tx *bolt.Tx) error {
-		return c.Packager.SetExportedAdds(tx, height, keepLocal)
+		return c.Packager.SetFwdFilter(tx, height, fwdFilter)
 	})
 }
 
