@@ -116,7 +116,7 @@ func (s *SphinxErrorEncrypter) OnionPacket() *sphinx.OnionPacket {
 // the embedded onion error encrypter.
 func NewSphinxErrorEncrypter() *SphinxErrorEncrypter {
 	return &SphinxErrorEncrypter{
-		&sphinx.OnionErrorEncrypter{},
+		OnionErrorEncrypter: &sphinx.OnionErrorEncrypter{},
 	}
 }
 
