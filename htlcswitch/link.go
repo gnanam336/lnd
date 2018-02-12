@@ -235,6 +235,9 @@ type channelLink struct {
 	// use this information to govern decisions based on HTLC timeouts.
 	bestHeight uint32
 
+	// keystoneBatch...
+	keystoneBatch []Keystone
+
 	// channel is a lightning network channel to which we apply htlc
 	// updates.
 	channel *lnwallet.LightningChannel
@@ -608,6 +611,7 @@ func (l *channelLink) syncChanStates() error {
 func (l *channelLink) resolveFwdPkgs() error {
 	fwdPkgs, err := l.channel.LoadFwdPkgs()
 	if err != nil {
+		glog.Printf("unable to load fwd pkgs: %v", err)
 		return err
 	}
 
@@ -618,6 +622,7 @@ func (l *channelLink) resolveFwdPkgs() error {
 		case channeldb.FwdStateCompleted:
 			err = l.channel.RemoveFwdPkg(fwdPkg.Height)
 			if err != nil {
+				glog.Printf("unable to remove fwd pkgs: %v", err)
 				return err
 			}
 
@@ -928,6 +933,7 @@ func (l *channelLink) handleDownStreamPkt(pkt *htlcPacket, isReProcess bool) {
 				failPkt := &htlcPacket{
 					incomingChanID: pkt.incomingChanID,
 					incomingHTLCID: pkt.incomingHTLCID,
+					sourceRef:      pkt.sourceRef,
 					amount:         htlc.Amount,
 					hasSource:      true,
 					localFailure:   localFailure,
@@ -938,13 +944,17 @@ func (l *channelLink) handleDownStreamPkt(pkt *htlcPacket, isReProcess bool) {
 
 				// TODO(roasbeef): need to identify if sent
 				// from switch so don't need to obfuscate
-				l.cfg.Switch.Forward(failPkt)
-				log.Infof("Unable to handle downstream add HTLC: %v", err)
+				go l.forwardBatch(failPkt)
+
 				return
 			}
 		}
 
 		log.Tracef("Received downstream htlc: payment_hash=%x, "+
+			"local_log_index=%v, batch_size=%v",
+			htlc.PaymentHash[:], index, l.batchCounter+1)
+
+		glog.Printf("Received downstream htlc: payment_hash=%x, "+
 			"local_log_index=%v, batch_size=%v",
 			htlc.PaymentHash[:], index, l.batchCounter+1)
 
@@ -955,12 +965,27 @@ func (l *channelLink) handleDownStreamPkt(pkt *htlcPacket, isReProcess bool) {
 		log.Debugf("Persisting keystone to create open circuit: %v->%v",
 			pkt.inKey(), pkt.outKey())
 
-		// Create circuit (remember the path) in order to forward settle/fail
-		// packet back.
-		if err := l.cfg.Switch.setKeystone(pkt.inKey(), pkt.outKey()); err != nil {
-			l.fail("unable to add full circuit: %v", err)
-			return
+		glog.Printf("Persisting keystone to create open circuit: %v->%v\n",
+			pkt.inKey(), pkt.outKey())
+
+		keystone := Keystone{
+			InKey:  pkt.inKey(),
+			OutKey: pkt.outKey(),
 		}
+
+		l.keystoneBatch = append(l.keystoneBatch, keystone)
+
+		/*
+			// Create circuit (remember the path) in order to forward settle/fail
+			// packet back.
+			if err := l.cfg.Switch.setKeystone(pkt.inKey(), pkt.outKey()); err != nil {
+				glog.Printf("setting keysonte failed: %v\n", err)
+				l.fail("unable to add full circuit: %v", err)
+				return
+			}
+		*/
+
+		glog.Printf("Sending message to peer\n")
 
 		l.cfg.Peer.SendMessage(htlc)
 
@@ -974,6 +999,16 @@ func (l *channelLink) handleDownStreamPkt(pkt *htlcPacket, isReProcess bool) {
 			// TODO(roasbeef): broadcast on-chain
 			l.fail("unable to settle incoming HTLC: %v", err)
 			return
+		}
+
+		circuit := l.cfg.Switch.lookupClosedCircuit(pkt.inKey())
+		if circuit != nil {
+			err = l.cfg.Switch.teardownCircuit(circuit, pkt)
+			if err != nil {
+				l.fail("unable to teardown circuit %s: %v",
+					pkt.inKey(), err)
+				return
+			}
 		}
 
 		// With the HTLC settled, we'll need to populate the wire
@@ -995,6 +1030,16 @@ func (l *channelLink) handleDownStreamPkt(pkt *htlcPacket, isReProcess bool) {
 		if err != nil {
 			log.Errorf("unable to cancel HTLC: %v", err)
 			return
+		}
+
+		circuit := l.cfg.Switch.lookupClosedCircuit(pkt.inKey())
+		if circuit != nil {
+			err = l.cfg.Switch.teardownCircuit(circuit, pkt)
+			if err != nil {
+				l.fail("unable to teardown circuit %s: %v",
+					pkt.inKey(), err)
+				return
+			}
 		}
 
 		// With the HTLC removed, we'll need to populate the wire
@@ -1196,9 +1241,12 @@ func (l *channelLink) handleUpstreamMsg(msg lnwire.Message) {
 		}
 
 		log.Debugf("remote height now at %v", l.channel.RemoteCommitHeight())
+		glog.Printf("remote height now at %v\n", l.channel.RemoteCommitHeight())
 
 		l.processRemoteSettleFails(settleFails)
+		glog.Printf("processed remote fails\n")
 		l.processRemoteAdds(fwdPkg, adds)
+		glog.Printf("processed remote adds\n")
 
 	case *lnwire.UpdateFee:
 		// We received fee update from peer. If we are the initiator we
@@ -1215,6 +1263,13 @@ func (l *channelLink) handleUpstreamMsg(msg lnwire.Message) {
 // commitment to their commitment chain which includes all the latest updates
 // we've received+processed up to this point.
 func (l *channelLink) updateCommitTx() error {
+	err := l.cfg.Switch.setKeystones(l.keystoneBatch...)
+	if err != nil {
+		return err
+	}
+
+	l.keystoneBatch = l.keystoneBatch[:0]
+
 	theirCommitSig, htlcSigs, err := l.channel.SignNextCommitment()
 	if err == lnwallet.ErrNoWindow {
 		log.Tracef("revocation window exhausted, unable to send %v",
@@ -1263,8 +1318,6 @@ func (l *channelLink) Peer() Peer {
 //
 // NOTE: Part of the ChannelLink interface.
 func (l *channelLink) ShortChanID() lnwire.ShortChannelID {
-	l.RLock()
-	defer l.RUnlock()
 	return l.shortChanID
 }
 
@@ -1392,6 +1445,8 @@ func (l *channelLink) String() string {
 func (l *channelLink) HandleSwitchPacket(pkt *htlcPacket) error {
 	log.Debugf("ChannelLink(%s) received switch packet inkey=%v, outkey=%v",
 		l.ShortChanID(), pkt.inKey(), pkt.outKey())
+	glog.Printf("ChannelLink(%s) received switch packet inkey=%v, outkey=%v\n",
+		l.ShortChanID(), pkt.inKey(), pkt.outKey())
 	l.mailBox.AddPacket(pkt)
 	return nil
 }
@@ -1487,7 +1542,9 @@ func (l *channelLink) processRemoteSettleFails(settleFails []*lnwallet.PaymentDe
 		}
 	}
 
-	l.cfg.Switch.Forward(switchPackets...)
+	glog.Printf("forwarding settle fails\n")
+
+	go l.forwardBatch(switchPackets...)
 }
 
 // processRemoteAdds serially processes each of the log updates which have
@@ -1529,10 +1586,7 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 		fwdPkg.ID(), onionReaders, rHashes,
 	)
 
-	var (
-		needUpdate    bool
-		forwardedAdds = make(map[uint16]struct{})
-	)
+	var needUpdate bool
 
 	for i, pd := range lockedInHtlcs {
 		idx := uint16(i)
@@ -1845,7 +1899,7 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 			default:
 				switch fwdPkg.State {
 				case channeldb.FwdStateProcessed:
-					if _, ok := fwdPkg.ExportedAdds[idx]; !ok {
+					if !fwdPkg.FwdFilter.Contains(idx) {
 						// This add was not forwarded on
 						// the previous processing
 						// phase, run it through our
@@ -2064,7 +2118,7 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 						obfuscator:     obfuscator,
 					}
 
-					forwardedAdds[idx] = struct{}{}
+					fwdPkg.FwdFilter.Set(idx)
 					switchPackets = append(switchPackets,
 						updatePacket)
 				}
@@ -2076,7 +2130,7 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 	// been fully processed.
 	if fwdPkg.State == channeldb.FwdStateLockedIn {
 		glog.Printf("marking fwding package %d as processed", fwdPkg.Height)
-		err := l.channel.SetExportedAdds(fwdPkg.Height, forwardedAdds)
+		err := l.channel.SetFwdFilter(fwdPkg.Height, fwdPkg.FwdFilter)
 		if err != nil {
 			return
 		}
@@ -2096,7 +2150,35 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 		return
 	}
 
-	l.cfg.Switch.Forward(switchPackets...)
+	go l.forwardBatch(switchPackets...)
+}
+
+func (l *channelLink) forwardBatch(packets ...*htlcPacket) {
+	errChan := l.cfg.Switch.forwardBatch(packets...)
+	l.handleBatchFwdErrs(errChan)
+}
+
+func (l *channelLink) handleBatchFwdErrs(errChan chan error) {
+	for {
+		err, ok := <-errChan
+		if !ok {
+			// Err chan has been drained or switch is
+			// shutting down. Either way, return.
+			return
+		}
+
+		if err == nil {
+			continue
+		}
+
+		log.Errorf("channel link(%v): unhandled error while "+
+			"forwarding htlc packet over htlcswitch: %v",
+			l, err)
+
+		glog.Printf("channel link(%v): unhandled error while "+
+			"forwarding htlc packet over htlcswitch: %v\n",
+			l, err)
+	}
 }
 
 // sendHTLCError functions cancels HTLC and send cancel message back to the
@@ -2150,4 +2232,13 @@ func (l *channelLink) fail(format string, a ...interface{}) {
 	reason := errors.Errorf(format, a...)
 	log.Error(reason)
 	go l.cfg.Peer.Disconnect(reason)
+}
+
+type Keystone struct {
+	InKey  CircuitKey
+	OutKey CircuitKey
+}
+
+func (k *Keystone) String() string {
+	return fmt.Sprintf("%s --> %s", k.InKey, k.OutKey)
 }
