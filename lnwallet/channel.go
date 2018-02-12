@@ -3969,10 +3969,10 @@ func (lc *LightningChannel) LoadFwdPkgs() ([]*channeldb.FwdPkg, error) {
 	return lc.channelState.LoadFwdPkgs()
 }
 
-func (lc *LightningChannel) SetExportedAdds(height uint64,
-	forwardedAdds map[uint16]struct{}) error {
+func (lc *LightningChannel) SetFwdFilter(height uint64,
+	fwdFilter *channeldb.PkgFilter) error {
 
-	return lc.channelState.SetExportedAdds(height, forwardedAdds)
+	return lc.channelState.SetFwdFilter(height, fwdFilter)
 }
 
 func (lc *LightningChannel) RemoveFwdPkg(height uint64) error {
