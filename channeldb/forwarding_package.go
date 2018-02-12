@@ -47,7 +47,7 @@ func (f *PkgFilter) Count() uint16 {
 }
 
 func (f *PkgFilter) Size() uint16 {
-	return (f.nels + 7) / 8
+	return 2 + (f.nels+7)/8
 }
 
 func (f *PkgFilter) Set(i uint16) {
@@ -65,6 +65,25 @@ func (f *PkgFilter) Contains(i uint16) bool {
 	shiftedBit := (f.filter[byt] >> (7 - bit)) & 0x01
 
 	return shiftedBit == 0x01
+}
+
+func (f *PkgFilter) Equal(f2 *PkgFilter) bool {
+	if f == f2 {
+		return true
+	}
+	if f.nels != f2.nels {
+		return false
+	}
+	if len(f.filter) != len(f2.filter) {
+		return false
+	}
+	for i, b := range f.filter {
+		if b != f2.filter[i] {
+			return false
+		}
+	}
+
+	return true
 }
 
 func (f *PkgFilter) IsFull() bool {
@@ -106,7 +125,7 @@ func (f *PkgFilter) Decode(r io.Reader) error {
 		return err
 	}
 
-	f.filter = make([]byte, f.Size())
+	f.filter = make([]byte, f.Size()-2)
 	_, err := io.ReadFull(r, f.filter)
 
 	return err
@@ -116,10 +135,10 @@ type FwdPkg struct {
 	Source lnwire.ShortChannelID
 	Height uint64
 
-	State        FwdState
-	Adds         []LogUpdate
-	ExportedAdds map[uint16]struct{}
-	AckFilter    *PkgFilter
+	State     FwdState
+	Adds      []LogUpdate
+	FwdFilter *PkgFilter
+	AckFilter *PkgFilter
 
 	SettleFails []LogUpdate
 }
@@ -132,8 +151,9 @@ func NewFwdPkg(source lnwire.ShortChannelID, height uint64,
 		Height:      height,
 		State:       FwdStateLockedIn,
 		Adds:        addUpdates,
-		SettleFails: failSettleUpdates,
+		FwdFilter:   NewPkgFilter(len(addUpdates)),
 		AckFilter:   NewPkgFilter(len(addUpdates)),
+		SettleFails: failSettleUpdates,
 	}
 }
 
@@ -167,8 +187,8 @@ type FwdPkgReader interface {
 
 type FwdPkgWriter interface {
 	AddFwdPkg(*bolt.Tx, *FwdPkg) error
+	SetFwdFilter(*bolt.Tx, uint64, *PkgFilter) error
 	AckAddHtlcs(*bolt.Tx, ...AddRef) error
-	SetExportedAdds(*bolt.Tx, uint64, map[uint16]struct{}) error
 }
 
 type FwdPkgRemover interface {
@@ -321,15 +341,20 @@ func (p *Packager) loadFwdPkg(fwdPkgBkt *bolt.Bucket, height uint64) (*FwdPkg, e
 	// Check to see if we have written the set exported filter adds to
 	// disk. If we haven't, processing of this package was never started, or
 	// failed during the last attempt.
-	exportedAddsBytes := heightBkt.Get(forwardedAddsKey)
-	if exportedAddsBytes == nil {
-		fwdPkg.ExportedAdds = make(map[uint16]struct{})
+	fwdFilterBytes := heightBkt.Get(forwardedAddsKey)
+	if fwdFilterBytes == nil {
+		fwdPkg.FwdFilter = NewPkgFilter(len(adds))
 		return fwdPkg, nil
+	}
+
+	fwdFilterReader := bytes.NewReader(fwdFilterBytes)
+	fwdPkg.FwdFilter = &PkgFilter{}
+	if err := fwdPkg.FwdFilter.Decode(fwdFilterReader); err != nil {
+		return nil, err
 	}
 
 	// Otherwise, a complete round of processing was completed, and we
 	// advance the package to FwdStateProcessed.
-	fwdPkg.ExportedAdds = bytesToUint16Set(exportedAddsBytes)
 	fwdPkg.State = FwdStateProcessed
 
 	// If not every add has been acked in this package, we still need to
@@ -414,15 +439,15 @@ func loadHtlcs(bkt *bolt.Bucket) ([]LogUpdate, error) {
 	return htlcs, nil
 }
 
-// SetExportedAdds writes the set of indexes corresponding to Adds at the
+// SetFwdFilter writes the set of indexes corresponding to Adds at the
 // `height` that are to be forwarded to the switch. Calling this method causes
 // the forwarding package at `height` to be in FwdStateProcessed. We write this
 // forwarding decision so that we always arrive at the same behavior for HTLCs
 // leaving this channel. After a restart, we skip validation of these Adds,
 // since they are assumed to have already been validated, and make the switch or
 // outgoing link responsible for handling replays.
-func (p *Packager) SetExportedAdds(tx *bolt.Tx, height uint64,
-	forwardedAdds map[uint16]struct{}) error {
+func (p *Packager) SetFwdFilter(tx *bolt.Tx, height uint64,
+	fwdFilter *PkgFilter) error {
 
 	fwdPkgBkt := tx.Bucket(fwdPackagesKey)
 	if fwdPkgBkt == nil {
@@ -446,9 +471,12 @@ func (p *Packager) SetExportedAdds(tx *bolt.Tx, height uint64,
 		return nil
 	}
 
-	forwardedAddsBytes = uint16SetToBytes(forwardedAdds)
+	var b bytes.Buffer
+	if err := fwdFilter.Encode(&b); err != nil {
+		return err
+	}
 
-	return heightBkt.Put(forwardedAddsKey, forwardedAddsBytes)
+	return heightBkt.Put(forwardedAddsKey, b.Bytes())
 }
 
 func (p *Packager) AckAddHtlcs(tx *bolt.Tx, addRefs ...AddRef) error {
@@ -598,7 +626,7 @@ func (p *Packager) RemovePkg(tx *bolt.Tx, height uint64) error {
 
 	sourceBytes := makeLogKey(p.source.ToUint64())
 
-	return fwdPkgBkt.Delete(sourceBytes[:])
+	return fwdPkgBkt.DeleteBucket(sourceBytes[:])
 }
 
 func putLogUpdate(bkt *bolt.Bucket, idx uint16, htlc *LogUpdate) error {
