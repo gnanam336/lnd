@@ -2,6 +2,7 @@ package htlcswitch
 
 import (
 	"bytes"
+	glog "log"
 	"sync"
 
 	"github.com/boltdb/bolt"
@@ -51,6 +52,8 @@ type CircuitMap interface {
 	// identified by inKey.
 	SetKeystone(inKey CircuitKey, outKey CircuitKey) error
 
+	SetKeystones(...Keystone) error
+
 	// NumOpen returns the number of circuits with HTLCs that have been
 	// forwarded via an outgoing link.
 	NumOpen() int
@@ -58,6 +61,10 @@ type CircuitMap interface {
 	// LookupCircuit queries the circuit map for the circuit identified by
 	// inKey.
 	LookupCircuit(inKey CircuitKey) *PaymentCircuit
+
+	LookupClosedCircuit(inKey CircuitKey) *PaymentCircuit
+
+	Close(inKey CircuitKey) error
 
 	// LookupByKeystone queries the circuit map for a circuit identified by
 	// its outgoing circuit key.
@@ -109,6 +116,8 @@ type circuitMap struct {
 	// opened is an in-memory maping of all full payment circuits, which is
 	// also synchronized with the persistent state of the circuit map.
 	opened map[CircuitKey]*PaymentCircuit
+
+	closed map[CircuitKey]struct{}
 
 	// hashIndex is a volatile index that facilitates fast queries by
 	// payment hash against the contents of circuits. This index can be
@@ -221,6 +230,7 @@ func (cm *circuitMap) restoreMemState() error {
 
 	cm.pending = pending
 	cm.opened = opened
+	cm.closed = make(map[CircuitKey]struct{})
 
 	// Finally, reconstruct the hash index by running through our set of
 	// open circuits.
@@ -249,6 +259,21 @@ func restoreCircuit(v []byte) (*PaymentCircuit, error) {
 // LookupByHTLC looks up the payment circuit by the outgoing channel and HTLC
 // IDs. Returns nil if there is no such circuit.
 func (cm *circuitMap) LookupCircuit(inKey CircuitKey) *PaymentCircuit {
+	cm.mtx.RLock()
+	defer cm.mtx.RUnlock()
+
+	return cm.lookupOpenCircuit(inKey)
+}
+
+func (cm *circuitMap) lookupOpenCircuit(inKey CircuitKey) *PaymentCircuit {
+	if _, ok := cm.closed[inKey]; !ok {
+		return cm.pending[inKey]
+	}
+
+	return nil
+}
+
+func (cm *circuitMap) LookupClosedCircuit(inKey CircuitKey) *PaymentCircuit {
 	cm.mtx.RLock()
 	defer cm.mtx.RUnlock()
 
@@ -375,9 +400,8 @@ func (cm *circuitMap) CommitCircuits(
 // been persisted, the circuit map's in-memory indexes are updated so that this
 // circuit can be queried using LookupByKeystone or LookupByPaymentHash.
 func (cm *circuitMap) SetKeystone(inKey, outKey CircuitKey) error {
-	cm.mtx.Lock()
-	defer cm.mtx.Unlock()
 
+	cm.mtx.RLock()
 	if _, ok := cm.opened[outKey]; ok {
 		return ErrDuplicateKeystone
 	}
@@ -386,6 +410,7 @@ func (cm *circuitMap) SetKeystone(inKey, outKey CircuitKey) error {
 	if !ok {
 		return ErrUnknownCircuit
 	}
+	cm.mtx.RUnlock()
 
 	if err := cm.db.Update(func(tx *bolt.Tx) error {
 		// Now, load the circuit bucket to which we will write the
@@ -400,6 +425,7 @@ func (cm *circuitMap) SetKeystone(inKey, outKey CircuitKey) error {
 		return err
 	}
 
+	cm.mtx.Lock()
 	// Since our persistent operation was successful, we can now modify the
 	// in memory representations. Set the outgoing circuit key on our
 	// pending circuit, add the same circuit to set of opened circuits, and
@@ -409,6 +435,89 @@ func (cm *circuitMap) SetKeystone(inKey, outKey CircuitKey) error {
 
 	cm.opened[outKey] = circuit
 	cm.addCircuitToHashIndex(circuit)
+	cm.mtx.Unlock()
+
+	return nil
+}
+
+// SetKeystones sets the outgoing circuit key for the circuit identified by
+// inKey, persistently marking the circuit as opened. After the changes have
+// been persisted, the circuit map's in-memory indexes are updated so that this
+// circuit can be queried using LookupByKeystone or LookupByPaymentHash.
+func (cm *circuitMap) SetKeystones(keystones ...Keystone) error {
+	if len(keystones) == 0 {
+		return nil
+	}
+
+	for i, ks := range keystones {
+		glog.Printf("setting keystone #%d: %s", i, ks)
+	}
+
+	cm.mtx.RLock()
+	for _, ks := range keystones {
+		if _, ok := cm.opened[ks.OutKey]; ok {
+			cm.mtx.RUnlock()
+			return ErrDuplicateKeystone
+		}
+
+		if _, ok := cm.pending[ks.InKey]; !ok {
+			cm.mtx.RUnlock()
+			return ErrUnknownCircuit
+		}
+	}
+	cm.mtx.RUnlock()
+
+	err := cm.db.Update(func(tx *bolt.Tx) error {
+		// Now, load the circuit bucket to which we will write the
+		// already serialized circuit.
+		keystoneBkt := tx.Bucket(circuitKeystoneKey)
+		if keystoneBkt == nil {
+			return ErrCorruptedCircuitMap
+		}
+
+		for _, ks := range keystones {
+			outBytes := ks.OutKey.Bytes()
+			inBytes := ks.InKey.Bytes()
+			err := keystoneBkt.Put(outBytes, inBytes)
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return err
+	}
+
+	cm.mtx.Lock()
+	circuits := make([]*PaymentCircuit, 0, len(keystones))
+	for _, ks := range keystones {
+		circuit, ok := cm.pending[ks.InKey]
+		if !ok {
+			cm.mtx.Unlock()
+			return ErrUnknownCircuit
+		}
+
+		circuits = append(circuits, circuit)
+	}
+
+	for i, circuit := range circuits {
+		ks := keystones[i]
+
+		// Since our persistent operation was successful, we can now
+		// modify the in memory representations. Set the outgoing
+		// circuit key on our pending circuit, add the same circuit to
+		// set of opened circuits, and add this circuit to the hash
+		// index.
+		circuit.Outgoing = &CircuitKey{}
+		*circuit.Outgoing = ks.OutKey
+
+		cm.opened[ks.OutKey] = circuit
+		cm.addCircuitToHashIndex(circuit)
+	}
+	cm.mtx.Unlock()
 
 	return nil
 }
@@ -422,20 +531,46 @@ func (cm *circuitMap) addCircuitToHashIndex(c *PaymentCircuit) {
 	cm.hashIndex[c.PaymentHash][c.OutKey()] = struct{}{}
 }
 
+func (cm *circuitMap) Close(inKey CircuitKey) error {
+	cm.mtx.Lock()
+	_, ok := cm.pending[inKey]
+	if !ok {
+		cm.mtx.Unlock()
+		return ErrUnknownCircuit
+	}
+
+	cm.closed[inKey] = struct{}{}
+	cm.mtx.Lock()
+
+	return nil
+}
+
 // Delete destroys the target circuit by removing it from the circuit map,
 // additionally removing the circuit's keystone if the HTLC was forwarded
 // through an outgoing link. The circuit should be identified by its incoming
 // circuit key.
 func (cm *circuitMap) Delete(inKey CircuitKey) error {
-	cm.mtx.Lock()
-	defer cm.mtx.Unlock()
 
+	cm.mtx.Lock()
 	circuit, ok := cm.pending[inKey]
 	if !ok {
+		cm.mtx.Unlock()
 		return ErrUnknownCircuit
 	}
 
-	if err := cm.db.Update(func(tx *bolt.Tx) error {
+	// With the persistent changes made, remove all references to this
+	// circuit from memory.
+	delete(cm.pending, inKey)
+	delete(cm.closed, inKey)
+
+	if circuit.HasKeystone() {
+		delete(cm.opened, circuit.OutKey())
+		cm.removeCircuitFromHashIndex(circuit)
+	}
+
+	cm.mtx.Unlock()
+
+	err := cm.db.Batch(func(tx *bolt.Tx) error {
 		// If this htlc made it to an outgoing link, load the keystone
 		// bucket from which we will remove the outgoing circuit key.
 		if circuit.HasKeystone() {
@@ -459,18 +594,22 @@ func (cm *circuitMap) Delete(inKey CircuitKey) error {
 		}
 
 		return circuitBkt.Delete(inKey.Bytes())
-	}); err != nil {
-		return err
+	})
+
+	if err == nil {
+		return nil
 	}
 
+	cm.mtx.Lock()
 	// With the persistent changes made, remove all references to this
 	// circuit from memory.
-	delete(cm.pending, inKey)
+	cm.pending[inKey] = circuit
 
 	if circuit.HasKeystone() {
-		delete(cm.opened, circuit.OutKey())
-		cm.removeCircuitFromHashIndex(circuit)
+		cm.opened[circuit.OutKey()] = circuit
+		cm.addCircuitToHashIndex(circuit)
 	}
+	cm.mtx.Unlock()
 
 	return nil
 }
