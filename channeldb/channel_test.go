@@ -198,6 +198,7 @@ func createTestChannelState(cdb *DB) (*OpenChannel, error) {
 		RevocationProducer:      producer,
 		RevocationStore:         store,
 		Db:                      cdb,
+		Packager:                NewPackager(chanID),
 	}, nil
 }
 
