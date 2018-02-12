@@ -43,6 +43,7 @@ type pendingPayment struct {
 	amount      lnwire.MilliSatoshi
 
 	preimage chan [sha256.Size]byte
+	response chan *htlcPacket
 	err      chan error
 
 	// deobfuscator is an serializable entity which is used if we received
@@ -254,6 +255,7 @@ func (s *Switch) SendHTLC(nextNode [33]byte, htlc *lnwire.UpdateAddHTLC,
 	// able to retrieve it and return response to the user.
 	payment := &pendingPayment{
 		err:          make(chan error, 1),
+		response:     make(chan *htlcPacket, 1),
 		preimage:     make(chan [sha256.Size]byte, 1),
 		paymentHash:  htlc.PaymentHash,
 		amount:       htlc.Amount,
@@ -287,10 +289,19 @@ func (s *Switch) SendHTLC(nextNode [33]byte, htlc *lnwire.UpdateAddHTLC,
 	// Returns channels so that other subsystem might wait/skip the
 	// waiting of handling of payment.
 	var preimage [sha256.Size]byte
+	var response *htlcPacket
 
 	select {
 	case e := <-payment.err:
 		err = e
+	case <-s.quit:
+		return zeroPreimage, errors.New("htlc switch have been stopped " +
+			"while waiting for payment result")
+	}
+
+	select {
+	case pkt := <-payment.response:
+		response = pkt
 	case <-s.quit:
 		return zeroPreimage, errors.New("htlc switch have been stopped " +
 			"while waiting for payment result")
@@ -302,6 +313,16 @@ func (s *Switch) SendHTLC(nextNode [33]byte, htlc *lnwire.UpdateAddHTLC,
 	case <-s.quit:
 		return zeroPreimage, errors.New("htlc switch have been stopped " +
 			"while waiting for payment result")
+	}
+
+	circuit := s.lookupCircuit(response.inKey())
+
+	// Remove circuit since we are about to complete an
+	// add/fail of this HTLC.
+	// TODO(conner): batch teardown by only modifying memory here,
+	// and batching at source link.
+	if terr := s.teardownCircuit(circuit, response); terr != nil {
+		log.Warnf("unable to teardown circuit %s: %v", response.inKey(), terr)
 	}
 
 	return preimage, err
@@ -480,6 +501,10 @@ func (s *Switch) forwardBatch(packets ...*htlcPacket) chan error {
 		}
 	}
 
+	if len(circuits) == 0 {
+		return errChan
+	}
+
 	// Write any circuits that we found to disk.
 	circuitsToAdd, err := s.circuits.CommitCircuits(circuits...)
 	if err != nil {
@@ -490,7 +515,7 @@ func (s *Switch) forwardBatch(packets ...*htlcPacket) chan error {
 	// If no new circuits were added as a result of CommitCircuits, exit
 	// early since we don't need to perform the following seek.
 	if len(circuitsToAdd) == 0 {
-		return nil
+		return errChan
 	}
 
 	// Using the list of circuits that were actually added, do an in-order
@@ -662,16 +687,19 @@ func (s *Switch) handleLocalDispatch(pkt *htlcPacket) error {
 			return ErrUnknownCircuit
 		}
 
-		// Remove circuit since we are about to complete an
-		// add/fail of this HTLC.
-		// TODO(conner): batch teardown by only modifying memory here,
-		// and batching at source link.
-		if err := s.teardownCircuit(circuit, pkt); err != nil {
-			return err
-		}
+		/*
+			// Remove circuit since we are about to complete an
+			// settle/fail of this HTLC.
+			// TODO(conner): batch teardown by only modifying memory here,
+			// and batching at source link.
+			if err := s.teardownCircuit(circuit, pkt); err != nil {
+				return err
+			}
+		*/
 
 		// Notify the user that his payment was successfully proceed.
 		payment.err <- nil
+		payment.response <- pkt
 		payment.preimage <- htlc.PaymentPreimage
 		s.removePendingPayment(pkt.incomingHTLCID)
 
@@ -746,13 +774,8 @@ func (s *Switch) handleLocalDispatch(pkt *htlcPacket) error {
 			return ErrUnknownCircuit
 		}
 
-		// TODO(conner): batch teardown by only modifying memory here,
-		// and batching at source link.
-		if err := s.teardownCircuit(circuit, pkt); err != nil {
-			return err
-		}
-
 		payment.err <- failure
+		payment.response <- pkt
 		payment.preimage <- zeroPreimage
 		s.removePendingPayment(pkt.incomingHTLCID)
 
@@ -841,14 +864,14 @@ func (s *Switch) handlePacketForward(packet *htlcPacket) error {
 	// which htlc add packet was initially received.
 	case *lnwire.UpdateFulfillHTLC:
 		var (
-			circuit *PaymentCircuit
-			err     error
+			//circuit *PaymentCircuit
+			err error
 		)
 
 		// If the source of this packet has not been set, use the
 		// circuit map to lookup the origin.
 		if !packet.hasSource {
-			circuit, err = s.closeCircuit(htlc, packet)
+			_, err = s.closeCircuit(htlc, packet)
 			if err != nil {
 				return err
 			}
@@ -868,24 +891,26 @@ func (s *Switch) handlePacketForward(packet *htlcPacket) error {
 			return err
 		}
 
-		// TODO(conner): batch teardown by only modifying memory here,
-		// and batching at source link.
-		if err := s.teardownCircuit(circuit, packet); err != nil {
-			return err
-		}
+		/*
+			// TODO(conner): batch teardown by only modifying memory here,
+			// and batching at source link.
+			if err := s.teardownCircuit(circuit, packet); err != nil {
+				return err
+			}
+		*/
 
 		return source.HandleSwitchPacket(packet)
 
 	case *lnwire.UpdateFailHTLC:
 		var (
-			circuit *PaymentCircuit
-			err     error
+			//circuit *PaymentCircuit
+			err error
 		)
 
 		// If the source of this packet has not been set, use the
 		// circuit map to lookup the origin.
 		if !packet.hasSource {
-			circuit, err = s.closeCircuit(htlc, packet)
+			_, err = s.closeCircuit(htlc, packet)
 			if err != nil {
 				return err
 			}
@@ -907,11 +932,13 @@ func (s *Switch) handlePacketForward(packet *htlcPacket) error {
 			return err
 		}
 
-		// TODO(conner): batch teardown by only modifying memory here,
-		// and batching at source link.
-		if err := s.teardownCircuit(circuit, packet); err != nil {
-			return err
-		}
+		/*
+			// TODO(conner): batch teardown by only modifying memory here,
+			// and batching at source link.
+			if err := s.teardownCircuit(circuit, packet); err != nil {
+				return err
+			}
+		*/
 
 		return source.HandleSwitchPacket(packet)
 
@@ -974,6 +1001,8 @@ func (s *Switch) closeCircuit(htlc lnwire.Message, pkt *htlcPacket) (*PaymentCir
 		log.Error(err)
 		return nil, err
 	}
+
+	s.circuits.Close(pkt.inKey())
 
 	pkt.incomingChanID = circuit.Incoming.ChanID
 	pkt.incomingHTLCID = circuit.Incoming.HtlcID
@@ -1645,6 +1674,10 @@ func (s *Switch) setKeystone(inKey, outKey CircuitKey) error {
 	return s.circuits.SetKeystone(inKey, outKey)
 }
 
+func (s *Switch) setKeystones(keystones ...Keystone) error {
+	return s.circuits.SetKeystones(keystones...)
+}
+
 // deleteCircuit persistently removes the circuit, and keystone if present,
 // from the circuit map.
 func (s *Switch) deleteCircuit(inKey CircuitKey) error {
@@ -1655,6 +1688,10 @@ func (s *Switch) deleteCircuit(inKey CircuitKey) error {
 // retrieve a particular circuit.
 func (s *Switch) lookupCircuit(inKey CircuitKey) *PaymentCircuit {
 	return s.circuits.LookupCircuit(inKey)
+}
+
+func (s *Switch) lookupClosedCircuit(inKey CircuitKey) *PaymentCircuit {
+	return s.circuits.LookupClosedCircuit(inKey)
 }
 
 // lookupKeystone queries the in-memory representation of the circuit map for a
