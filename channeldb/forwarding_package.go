@@ -11,28 +11,61 @@ import (
 	"github.com/lightningnetwork/lnd/lnwire"
 )
 
+var ErrCorruptedFwdPkg = errors.New(
+	"fwding package has invalid on-disk structure")
+
+// FwdState is an enum used to describe the lifecycle of a FwdPkg.
 type FwdState byte
 
 const (
+	// FwdStateLockedIn is the starting state for all forwarding packages.
+	// Packages in this state have not yet committed to the exact set of
+	// Adds to forward to the switch.
 	FwdStateLockedIn FwdState = iota
+
+	// FwdStateProcessed marks the state in which all Adds have been
+	// locally processed and the forwarding decision to the switch has been
+	// persisted.
 	FwdStateProcessed
+
+	// FwdStateFullyAcked indicates the that all Adds in this forwarding
+	// package have received a corresponding settle or fail that has been
+	// included in an outgoing commitment txn.
 	FwdStateFullyAcked
+
+	// FwdStateCompleted signals that all Adds have been acked, and that all
+	// settles and fails have been delivered to their sources. Packages in
+	// this state can be removed permanently.
 	FwdStateCompleted
 )
 
 var (
-	fwdPackagesKey      = []byte("fwd-packages")
-	addBucketKey        = []byte("add-updates")
+	// fwdPackagesKey
+	fwdPackagesKey = []byte("fwd-packages")
+
+	// addBucketKey
+	addBucketKey = []byte("add-updates")
+
+	// failSettleBucketKey
 	failSettleBucketKey = []byte("fail-settle-updates")
-	forwardedAddsKey    = []byte("forwarded-adds")
-	ackFilterKey        = []byte("ack-filter-key")
+
+	// forwardedAddsKey
+	forwardedAddsKey = []byte("forwarded-adds")
+
+	// ackFilterKey
+	ackFilterKey = []byte("ack-filter-key")
 )
 
+// PkgFilter is used to compactly represent a particular subset of the Adds in a
+// forwarding package. Each filter is represented as a simple, statically-sized
+// bitvector, where the elements are intended to be the indices of the Adds as
+// they are written in the FwdPkg.
 type PkgFilter struct {
 	nels   uint16
 	filter []byte
 }
 
+// NewPkgFilter initializes an empty PkgFilter supporting `nels` elements.
 func NewPkgFilter(nels int) *PkgFilter {
 	filterLen := (nels + 7) / 8
 
@@ -42,15 +75,16 @@ func NewPkgFilter(nels int) *PkgFilter {
 	}
 }
 
+// Count returns the number of elements represented by this PkgFilter.
 func (f *PkgFilter) Count() uint16 {
 	return f.nels
 }
 
-func (f *PkgFilter) Size() uint16 {
-	return 2 + (f.nels+7)/8
-}
-
+// Set marks the `i`-th element as included by this filter.
+// NOTE: It is assumed that i is always less than nels.
 func (f *PkgFilter) Set(i uint16) {
+	// TODO(conner): ignore if > nels to prevent panic?
+
 	byt := i / 8
 	bit := i % 8
 
@@ -58,15 +92,21 @@ func (f *PkgFilter) Set(i uint16) {
 	f.filter[byt] = f.filter[byt] | byte(1<<(7-bit))
 }
 
+// Contains queries the filter for membership of index `i`.
+// NOTE: It is assumed that i is always less than nels.
 func (f *PkgFilter) Contains(i uint16) bool {
+	// TODO(conner): ignore if > nels to prevent panic?
+
 	byt := i / 8
 	bit := i % 8
 
+	// Read the i-th bit in the filter.
 	shiftedBit := (f.filter[byt] >> (7 - bit)) & 0x01
 
 	return shiftedBit == 0x01
 }
 
+// Equal checks two PkgFilters for equality.
 func (f *PkgFilter) Equal(f2 *PkgFilter) bool {
 	if f == f2 {
 		return true
@@ -86,6 +126,8 @@ func (f *PkgFilter) Equal(f2 *PkgFilter) bool {
 	return true
 }
 
+// IsFull returns true if every element in the filter has been Set, and false
+// otherwise.
 func (f *PkgFilter) IsFull() bool {
 	rem := f.nels % 8
 	for i, b := range f.filter {
@@ -103,13 +145,18 @@ func (f *PkgFilter) IsFull() bool {
 			if !f.Contains(idx) {
 				return false
 			}
-
 		}
 	}
 
 	return true
 }
 
+// Size returns number of bytes produced when the PkgFilter is serialized.
+func (f *PkgFilter) Size() uint16 {
+	return 2 + (f.nels+7)/8
+}
+
+// Encode writes the filter to the provided io.Writer.
 func (f *PkgFilter) Encode(w io.Writer) error {
 	if err := binary.Write(w, binary.BigEndian, f.nels); err != nil {
 		return err
@@ -120,6 +167,7 @@ func (f *PkgFilter) Encode(w io.Writer) error {
 	return err
 }
 
+// Decode reads the filter from the provided io.Reader.
 func (f *PkgFilter) Decode(r io.Reader) error {
 	if err := binary.Read(r, binary.BigEndian, &f.nels); err != nil {
 		return err
@@ -131,18 +179,53 @@ func (f *PkgFilter) Decode(r io.Reader) error {
 	return err
 }
 
+// FwdPkg records all adds, settles, and fails that were locked in as a result
+// of the remote peer sending us a revocation. Each package is identified by
+// the short chanid and remote commitment height corresponding to the revocation
+// that locked in the HTLCs. For everything expect a locally initiated payment,
+// settles and fails in a forwarding package must have corresponding Add in
+// another package, and can be removed individually once the source link has
+// received the fail/settle.
+//
+// Adds cannot be removed, as we need to present the same batch of Adds to
+// properly handle replay protection. Instead, we use a PkgFilter to mark that
+// we have finished processing a particular Add. A FwdPkg should only  be
+// deleted after the AckFilter is full and all settles and fails have been
+// persistently removed.
 type FwdPkg struct {
+	// Source identifies the channel that wrote this forwarding package.
 	Source lnwire.ShortChannelID
+
+	// Height is the height of the remote commitment chain that locked in
+	// this forwarding package.
 	Height uint64
 
-	State     FwdState
-	Adds      []LogUpdate
+	// State signals the persistent condition of the package and directs how
+	// to reprocess the package in the event of failures.
+	State FwdState
+
+	// Adds contains all add messages which need to be processed and
+	// forwarded to the switch. Adds does not change over the life of a
+	// forwarding package.
+	Adds []LogUpdate
+
+	// FwdFilter a filter containing the indices of all Adds that were
+	// forwarded to the switch.
 	FwdFilter *PkgFilter
+
+	// AckFilter a filter containing the indices of all Adds for which the
+	// source has received a settle or fail and is reflected in the next
+	// commitment txn. A package should not be removed until IsFull()
+	// returns true.
 	AckFilter *PkgFilter
 
+	// SettleFails contains all settle and fail messages that should be
+	// forwarded to the switch.
 	SettleFails []LogUpdate
 }
 
+// NewFwdPkg initializes a new forwarding package in FwdStateLockedIn. This
+// should be used to create a package at the time of we receive a revocation.
 func NewFwdPkg(source lnwire.ShortChannelID, height uint64,
 	addUpdates, failSettleUpdates []LogUpdate) *FwdPkg {
 
@@ -157,6 +240,8 @@ func NewFwdPkg(source lnwire.ShortChannelID, height uint64,
 	}
 }
 
+// ID returns an unique identifier for this package, used to ensure that sphinx
+// replay processing of this batch is idempotent.
 func (f *FwdPkg) ID() []byte {
 	var id = make([]byte, 16)
 	byteOrder.PutUint64(id[:8], f.Source.ToUint64())
@@ -164,54 +249,74 @@ func (f *FwdPkg) ID() []byte {
 	return id
 }
 
+// String returns a human-readable description of the forwarding package.
 func (f *FwdPkg) String() string {
 	return fmt.Sprintf("%T(src=%v, height=%v, nadds=%v, nfailsettles=%v)",
 		f, f.Source, f.Height, len(f.Adds), len(f.SettleFails))
 }
 
+// AddRef is used to acknowledge a Add in particular FwdPkg. The short channel
+// ID is assumed to be that of the packager.
 type AddRef struct {
 	Height uint64
 	Index  uint16
 }
 
+// SettleFailRef is used to locate a Settle/Fail in another channel's FwdPkg. A
+// channel does not remove its own Settle/Fail htlcs, so the source is provided
+// to locate a db bucket belonging another channel.
 type SettleFailRef struct {
 	Source lnwire.ShortChannelID
 	Height uint64
 	Index  uint16
 }
 
-type FwdPkgReader interface {
-	LoadFwdPkg(*bolt.Tx, uint64) (*FwdPkg, error)
-	LoadFwdPkgs(*bolt.Tx) ([]*FwdPkg, error)
-}
-
+// FwdPkgWriter exposes methods used by channel to create and update forwarding
+// packages.
 type FwdPkgWriter interface {
 	AddFwdPkg(*bolt.Tx, *FwdPkg) error
 	SetFwdFilter(*bolt.Tx, uint64, *PkgFilter) error
 	AckAddHtlcs(*bolt.Tx, ...AddRef) error
+	RemoveHtlcs(*bolt.Tx, ...SettleFailRef) error
 }
 
+// FwdPkgReader facilitates loading active forwarding packages from disk.
+type FwdPkgReader interface {
+	LoadFwdPkgs(*bolt.Tx) ([]*FwdPkg, error)
+}
+
+// FwdPkgRemover permits the ability to delete a forwarding package that has
+// been processed completely.
 type FwdPkgRemover interface {
-	RemoveHtlcs(*bolt.Tx, ...SettleFailRef) error
 	RemovePkg(*bolt.Tx, uint64) error
 }
 
+// FwdPackager supports all operations required to modify fwd packages, such as
+// creation, updates, reading, and removal. The interfaces are broken down in
+// this way to support future delegation of the subinterfaces.
 type FwdPackager interface {
-	FwdPkgReader
 	FwdPkgWriter
+	FwdPkgReader
 	FwdPkgRemover
 }
 
+// Packager is used by a channel to manage the lifecycle of its forwarding
+// packages. The packager is tied to a particular source channel ID, allowing it
+// to create and edit its own packages. Each packager also has the ability to
+// remove fail/settle htlcs that correspond to an add contained in one of
+// source's packages.
 type Packager struct {
 	source lnwire.ShortChannelID
 }
 
+// NewPackager creates a new packager for a single channel.
 func NewPackager(source lnwire.ShortChannelID) *Packager {
 	return &Packager{
 		source: source,
 	}
 }
 
+// AddFwdPkg writes a newly locked in forwarding package to disk.
 func (*Packager) AddFwdPkg(tx *bolt.Tx, fwdPkg *FwdPkg) error {
 	fwdPkgBkt, err := tx.CreateBucketIfNotExists(fwdPackagesKey)
 	if err != nil {
@@ -236,6 +341,12 @@ func (*Packager) AddFwdPkg(tx *bolt.Tx, fwdPkg *FwdPkg) error {
 		return err
 	}
 
+	// Write SETTLE/FAIL updates we received at this commit height.
+	failSettleBkt, err := heightBkt.CreateBucketIfNotExists(failSettleBucketKey)
+	if err != nil {
+		return err
+	}
+
 	for i := range fwdPkg.Adds {
 		err = putLogUpdate(addBkt, uint16(i), &fwdPkg.Adds[i])
 		if err != nil {
@@ -254,12 +365,6 @@ func (*Packager) AddFwdPkg(tx *bolt.Tx, fwdPkg *FwdPkg) error {
 		return err
 	}
 
-	// Write SETTLE/FAIL updates we received at this commit height.
-	failSettleBkt, err := heightBkt.CreateBucketIfNotExists(failSettleBucketKey)
-	if err != nil {
-		return err
-	}
-
 	for i := range fwdPkg.SettleFails {
 		err = putLogUpdate(failSettleBkt, uint16(i), &fwdPkg.SettleFails[i])
 		if err != nil {
@@ -270,15 +375,59 @@ func (*Packager) AddFwdPkg(tx *bolt.Tx, fwdPkg *FwdPkg) error {
 	return nil
 }
 
-func (p *Packager) LoadFwdPkg(tx *bolt.Tx, height uint64) (*FwdPkg, error) {
+// putLogUpdate encodes writes an htlc under the provided index.
+func putLogUpdate(bkt *bolt.Bucket, idx uint16, htlc *LogUpdate) error {
+	var b bytes.Buffer
+	if err := htlc.Encode(&b); err != nil {
+		return err
+	}
+
+	return bkt.Put(uint16Key(idx), b.Bytes())
+}
+
+// LoadFwdPkgs scans the forwarding log for any packages that haven't been
+// processed, and returns their deserialized log updates in map indexed by the
+// remote commitment height at which the updates were locked in.
+func (p *Packager) LoadFwdPkgs(tx *bolt.Tx) ([]*FwdPkg, error) {
 	fwdPkgBkt := tx.Bucket(fwdPackagesKey)
 	if fwdPkgBkt == nil {
 		return nil, nil
 	}
 
-	return p.loadFwdPkg(fwdPkgBkt, height)
+	sourceKey := makeLogKey(p.source.ToUint64())
+	sourceBkt := fwdPkgBkt.Bucket(sourceKey[:])
+	if sourceBkt == nil {
+		return nil, nil
+	}
+
+	var heights []uint64
+	if err := sourceBkt.ForEach(func(k, _ []byte) error {
+		if len(k) != 8 {
+			return nil
+		}
+
+		heights = append(heights, byteOrder.Uint64(k))
+
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	var fwdPkgs []*FwdPkg
+	for _, height := range heights {
+		fwdPkg, err := p.loadFwdPkg(fwdPkgBkt, height)
+		if err != nil {
+			return nil, err
+		}
+
+		fwdPkgs = append(fwdPkgs, fwdPkg)
+	}
+
+	return fwdPkgs, nil
 }
 
+// loadFwPkg reads the packager's fwd pkg at a given height, and determines the
+// appropriate FwdState.
 func (p *Packager) loadFwdPkg(fwdPkgBkt *bolt.Bucket, height uint64) (*FwdPkg, error) {
 	sourceKey := makeLogKey(p.source.ToUint64())
 	sourceBkt := fwdPkgBkt.Bucket(sourceKey[:])
@@ -380,47 +529,8 @@ func (p *Packager) loadFwdPkg(fwdPkgBkt *bolt.Bucket, height uint64) (*FwdPkg, e
 	return fwdPkg, nil
 }
 
-// LoadFwdPkgs scans the forwarding log for any packages that haven't been
-// processed, and returns their deserialized log updates in map indexed by the
-// remote commitment height at which the updates were locked in.
-func (p *Packager) LoadFwdPkgs(tx *bolt.Tx) ([]*FwdPkg, error) {
-	fwdPkgBkt := tx.Bucket(fwdPackagesKey)
-	if fwdPkgBkt == nil {
-		return nil, nil
-	}
-
-	sourceKey := makeLogKey(p.source.ToUint64())
-	sourceBkt := fwdPkgBkt.Bucket(sourceKey[:])
-	if sourceBkt == nil {
-		return nil, nil
-	}
-
-	var heights []uint64
-	if err := sourceBkt.ForEach(func(k, _ []byte) error {
-		if len(k) != 8 {
-			return nil
-		}
-
-		heights = append(heights, byteOrder.Uint64(k))
-
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-
-	var fwdPkgs []*FwdPkg
-	for _, height := range heights {
-		fwdPkg, err := p.loadFwdPkg(fwdPkgBkt, height)
-		if err != nil {
-			return nil, err
-		}
-
-		fwdPkgs = append(fwdPkgs, fwdPkg)
-	}
-
-	return fwdPkgs, nil
-}
-
+// loadHtlcs retrieves all serialized htlcs in a bucket, returning
+// them in order of the indexes they were written under.
 func loadHtlcs(bkt *bolt.Bucket) ([]LogUpdate, error) {
 	var htlcs []LogUpdate
 	if err := bkt.ForEach(func(_, v []byte) error {
@@ -479,6 +589,9 @@ func (p *Packager) SetFwdFilter(tx *bolt.Tx, height uint64,
 	return heightBkt.Put(forwardedAddsKey, b.Bytes())
 }
 
+// AckAddHtlcs accepts a list of references to add htlcs, and updates the
+// AckAddFilter of those forwarding packages to indicate that a settle or fail
+// has been received in response to the add.
 func (p *Packager) AckAddHtlcs(tx *bolt.Tx, addRefs ...AddRef) error {
 	if len(addRefs) == 0 {
 		return nil
@@ -506,6 +619,8 @@ func (p *Packager) AckAddHtlcs(tx *bolt.Tx, addRefs ...AddRef) error {
 		}
 	}
 
+	// Load each height bucket once and remove all acked htlcs at that
+	// height.
 	for height, indexes := range heightDiffs {
 		err := ackAddHtlcsAtHeight(sourceBkt, height, indexes)
 		if err != nil {
@@ -516,6 +631,8 @@ func (p *Packager) AckAddHtlcs(tx *bolt.Tx, addRefs ...AddRef) error {
 	return nil
 }
 
+// ackAddHtlcsAtHeight updates the AddAckFilter of a single forwarding package
+// with a list of indexes, writing the resulting filter back in its place.
 func ackAddHtlcsAtHeight(sourceBkt *bolt.Bucket, height uint64,
 	indexes []uint16) error {
 
@@ -551,6 +668,10 @@ func ackAddHtlcsAtHeight(sourceBkt *bolt.Bucket, height uint64,
 	return heightBkt.Put(ackFilterKey, ackFilterBuf.Bytes())
 }
 
+// RemoveHtlcs persistently deletes settles or fails from a remote forwarding
+// package. This should only be called after the source of the Add has locked in
+// the settle/fail, or it becomes otherwise safe to forgo retransmitting the
+// settle/fail after a restart.
 func (*Packager) RemoveHtlcs(tx *bolt.Tx, settleFailRefs ...SettleFailRef) error {
 	if len(settleFailRefs) == 0 {
 		return nil
@@ -562,7 +683,7 @@ func (*Packager) RemoveHtlcs(tx *bolt.Tx, settleFailRefs ...SettleFailRef) error
 	}
 
 	// Organize the forward references such that we just get a single slice
-	// of indexes for each unique height.
+	// of indexes for each unique destination-height pair.
 	var destHeightDiffs = make(map[lnwire.ShortChannelID]map[uint64][]uint16)
 	for _, settleFailRef := range settleFailRefs {
 		destHeights, ok := destHeightDiffs[settleFailRef.Source]
@@ -580,6 +701,8 @@ func (*Packager) RemoveHtlcs(tx *bolt.Tx, settleFailRefs ...SettleFailRef) error
 		}
 	}
 
+	// With the references organized by destination and height, we now load
+	// each remote bucket, and remove any settle/fail htlcs.
 	for dest, destHeights := range destHeightDiffs {
 		destKey := makeLogKey(dest.ToUint64())
 		destBkt := fwdPkgBkt.Bucket(destKey[:])
@@ -599,6 +722,8 @@ func (*Packager) RemoveHtlcs(tx *bolt.Tx, settleFailRefs ...SettleFailRef) error
 	return nil
 }
 
+// removeHtlcsAtHeight given a destination bucket, removes the provided indexes
+// at particular a height.
 func removeHtlcsAtHeight(destBkt *bolt.Bucket, height uint64,
 	indexes []uint16) error {
 
@@ -608,7 +733,7 @@ func removeHtlcsAtHeight(destBkt *bolt.Bucket, height uint64,
 		return nil
 	}
 
-	// Update the ack filter for this height.
+	// Remove the htlcs at this height based on the provided indexes.
 	for _, index := range indexes {
 		if err := heightBkt.Delete(uint16Key(index)); err != nil {
 			return err
@@ -618,6 +743,8 @@ func removeHtlcsAtHeight(destBkt *bolt.Bucket, height uint64,
 	return nil
 }
 
+// RemovePkg deletes the forwarding package at the given height from the
+// packager's source bucket.
 func (p *Packager) RemovePkg(tx *bolt.Tx, height uint64) error {
 	fwdPkgBkt := tx.Bucket(fwdPackagesKey)
 	if fwdPkgBkt == nil {
@@ -625,29 +752,14 @@ func (p *Packager) RemovePkg(tx *bolt.Tx, height uint64) error {
 	}
 
 	sourceBytes := makeLogKey(p.source.ToUint64())
-
-	return fwdPkgBkt.DeleteBucket(sourceBytes[:])
-}
-
-func putLogUpdate(bkt *bolt.Bucket, idx uint16, htlc *LogUpdate) error {
-	var b bytes.Buffer
-	if err := htlc.Encode(&b); err != nil {
-		return err
+	sourceBkt := fwdPkgBkt.Bucket(sourceBytes[:])
+	if sourceBkt == nil {
+		return ErrCorruptedFwdPkg
 	}
 
-	return bkt.Put(uint16Key(idx), b.Bytes())
-}
+	heightKey := makeLogKey(height)
 
-var (
-	errBucketNotEmpty  = errors.New("bucket is not empty")
-	ErrFwdPkgNotEmpty  = errors.New("fwding package is not empty")
-	ErrCorruptedFwdPkg = errors.New("fwding package has invalid on-disk structure")
-)
-
-func isBucketEmpty(bkt *bolt.Bucket) error {
-	return bkt.ForEach(func(_, _ []byte) error {
-		return errBucketNotEmpty
-	})
+	return sourceBkt.DeleteBucket(heightKey[:])
 }
 
 // uint16Key writes the provided 16-bit unsigned integer to a 2-byte slice.
@@ -662,32 +774,6 @@ func uint16FromKey(key []byte) uint16 {
 	return byteOrder.Uint16(key)
 }
 
-// uint16SetToBytes serializes a slice of uint16s into a slice of bytes.
-func uint16SetToBytes(u16s map[uint16]struct{}) []byte {
-	var bs = make([]byte, 2*len(u16s))
-	var i int
-	for b := range u16s {
-		bs[i] = byte(b >> 8)
-		bs[i+1] = byte(b)
-		i += 2
-	}
-
-	return bs
-}
-
-// bytesToUint16s deserializes a byte slice back into a slice of uint16s. This
-// method assumes the length of the provided byte slice is even.
-func bytesToUint16Set(bs []byte) map[uint16]struct{} {
-	nels := len(bs) / 2
-	var u16Set = make(map[uint16]struct{}, nels)
-	for i := 0; i < nels; i++ {
-		idx := uint16(bs[2*i]<<8) | uint16(bs[2*i+1])
-		u16Set[idx] = struct{}{}
-	}
-
-	return u16Set
-}
-
-// Compile-time constraint to ensure that packager implements the public
-// Packager interface.
+// Compile-time constraint to ensure that Packager implements the public
+// FwdPackager interface.
 var _ FwdPackager = (*Packager)(nil)
