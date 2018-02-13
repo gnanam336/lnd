@@ -1162,9 +1162,7 @@ func (c *OpenChannel) LoadFwdPkgs() ([]*FwdPkg, error) {
 	return fwdPkgs, nil
 }
 
-func (c *OpenChannel) SetFwdFilter(height uint64,
-	fwdFilter *PkgFilter) error {
-
+func (c *OpenChannel) SetFwdFilter(height uint64, fwdFilter *PkgFilter) error {
 	return c.Db.Update(func(tx *bolt.Tx) error {
 		return c.Packager.SetFwdFilter(tx, height, fwdFilter)
 	})
