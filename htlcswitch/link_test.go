@@ -3008,7 +3008,7 @@ func TestChannelLinkAcceptDuplicatePayment(t *testing.T) {
 	_, err = n.aliceServer.htlcSwitch.SendHTLC(n.bobServer.PubKey(), htlc,
 		newMockDeobfuscator())
 	if err != nil {
-		t.Fatal("error shouldn't have been received got: %v", err)
+		t.Fatalf("error shouldn't have been received got: %v", err)
 	}
 }
 
