@@ -295,6 +295,9 @@ type PaymentDescriptor struct {
 	isForwarded bool
 }
 
+// PayDescsFromRemoteLogUpdates converts a slice of LogUpdates received by a
+// the remote peer into PaymentDescriptors to inform a link's forwarding
+// decisions.
 func (lc *LightningChannel) PayDescsFromRemoteLogUpdates(
 	logUpdates []channeldb.LogUpdate) []*PaymentDescriptor {
 
@@ -3963,18 +3966,21 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 	return fwdPkg, addsToForward, settleFailsToForward, nil
 }
 
-// LoadLockedInHtlcs loads any pending log updates from disk and returns the
-// payment descriptors to be processed by the link.
+// LoadFwdPkgs loads any pending log updates from disk and returns the payment
+// descriptors to be processed by the link.
 func (lc *LightningChannel) LoadFwdPkgs() ([]*channeldb.FwdPkg, error) {
 	return lc.channelState.LoadFwdPkgs()
 }
 
+// SetFwdFilter writes the forwarding decision for a given remote commitment
+// height.
 func (lc *LightningChannel) SetFwdFilter(height uint64,
 	fwdFilter *channeldb.PkgFilter) error {
 
 	return lc.channelState.SetFwdFilter(height, fwdFilter)
 }
 
+// RemoveFwdPkg permanently deletes the forwarding package at the given height.
 func (lc *LightningChannel) RemoveFwdPkg(height uint64) error {
 	return lc.channelState.RemoveFwdPkg(height)
 }
