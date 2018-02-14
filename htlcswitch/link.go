@@ -3,7 +3,6 @@ package htlcswitch
 import (
 	"bytes"
 	"fmt"
-	glog "log"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -135,6 +134,10 @@ type ChannelLinkConfig struct {
 	// destination of HTLC.
 	DecodeHopIterator func(io.Reader, []byte) (HopIterator, lnwire.FailCode)
 
+	// DecodeHopIterators facilitates batched decoding of HTLC Sphinx onion
+	// blobs, which are then used to inform how to forward an HTLC.
+	// NOTE: This function assumes the same set of readers and preimages are
+	// always presented for the same identifier.
 	DecodeHopIterators func([]byte, []io.Reader, [][]byte) ([]HopIterator, []lnwire.FailCode)
 
 	// DecodeOnionObfuscator function is responsible for decoding HTLC
@@ -235,7 +238,8 @@ type channelLink struct {
 	// use this information to govern decisions based on HTLC timeouts.
 	bestHeight uint32
 
-	// keystoneBatch...
+	// keystoneBatch represents a volatile list of keystones that must be
+	// written before attempting to sign the next commitment txn.
 	keystoneBatch []Keystone
 
 	// channel is a lightning network channel to which we apply htlc
@@ -608,52 +612,67 @@ func (l *channelLink) syncChanStates() error {
 	return nil
 }
 
+// resolveFwdPkgs loads any forwarding packages for this link from disk, and
+// reprocesses them in order. The primary goal is to make sure that any HTLCs we
+// previously received are reinstated in memory, and forwarded to the switch if
+// necessary. After a restart, this will also delete any previously completed
+// packages.
 func (l *channelLink) resolveFwdPkgs() error {
 	fwdPkgs, err := l.channel.LoadFwdPkgs()
 	if err != nil {
-		glog.Printf("unable to load fwd pkgs: %v", err)
 		return err
 	}
 
 	for _, fwdPkg := range fwdPkgs {
-		switch fwdPkg.State {
-
-		// Remove any completed packages to clear up space.
-		case channeldb.FwdStateCompleted:
-			err = l.channel.RemoveFwdPkg(fwdPkg.Height)
-			if err != nil {
-				glog.Printf("unable to remove fwd pkgs: %v", err)
-				return err
-			}
-
-		// If the package is fully acked but not completed, it must
-		// still have settles and fails to propagate.
-		case channeldb.FwdStateFullyAcked:
-			settleFails := l.channel.PayDescsFromRemoteLogUpdates(
-				fwdPkg.SettleFails,
-			)
-			l.processRemoteSettleFails(settleFails)
-
-		// Otherwise this is either a new package or one has gone
-		// through processing, but contains htlcs that need to be
-		// restored in memory. We replay this forwarding package to make
-		// sure our local mem state is resurrected, we mimic any
-		// original responses back to the remote party, and reforward
-		// the relevant HTLCs to the switch.
-		default:
-			// Forward any settles and fails that have not been
-			// removed from this package.
-			settleFails := l.channel.PayDescsFromRemoteLogUpdates(
-				fwdPkg.SettleFails,
-			)
-			l.processRemoteSettleFails(settleFails)
-
-			// And batch replay the adds.
-			adds := l.channel.PayDescsFromRemoteLogUpdates(
-				fwdPkg.Adds,
-			)
-			l.processRemoteAdds(fwdPkg, adds)
+		if err := l.resolveFwdPkg(fwdPkg); err != nil {
+			return err
 		}
+	}
+
+	return nil
+}
+
+// resolveFwdPkg interprets the FwdState of the provided package, either
+// reprocesses any outstanding htlcs in the package, or performs garbage
+// collection on the package.
+func (l *channelLink) resolveFwdPkg(fwdPkg *channeldb.FwdPkg) error {
+	switch fwdPkg.State {
+
+	// Remove any completed packages to clear up space.
+	case channeldb.FwdStateCompleted:
+		err := l.channel.RemoveFwdPkg(fwdPkg.Height)
+		if err != nil {
+			return err
+		}
+
+	// If the package is fully acked but not completed, it must still have
+	// settles and fails to propagate.
+	case channeldb.FwdStateFullyAcked:
+		settleFails := l.channel.PayDescsFromRemoteLogUpdates(
+			fwdPkg.SettleFails,
+		)
+		l.processRemoteSettleFails(settleFails)
+
+	// Otherwise this is either a new package or one has gone through
+	// processing, but contains htlcs that need to be restored in memory. We
+	// replay this forwarding package to make sure our local mem state is
+	// resurrected, we mimic any original responses back to the remote
+	// party, and reforward the relevant HTLCs to the switch.
+	default:
+		// Forward any settles and fails that have not been removed from
+		// this package.
+		settleFails := l.channel.PayDescsFromRemoteLogUpdates(
+			fwdPkg.SettleFails,
+		)
+		l.processRemoteSettleFails(settleFails)
+
+		// Finally, replay *ALL ADDS* in this forwarding package. The
+		// downstream logic is able to filter out any duplicates, but
+		// we must shove the entire, original set of adds down the
+		// pipeline so that the batch of adds presented to the sphinx
+		// router does not ever change.
+		adds := l.channel.PayDescsFromRemoteLogUpdates(fwdPkg.Adds)
+		l.processRemoteAdds(fwdPkg, adds)
 	}
 
 	return nil
@@ -954,10 +973,6 @@ func (l *channelLink) handleDownStreamPkt(pkt *htlcPacket, isReProcess bool) {
 			"local_log_index=%v, batch_size=%v",
 			htlc.PaymentHash[:], index, l.batchCounter+1)
 
-		glog.Printf("Received downstream htlc: payment_hash=%x, "+
-			"local_log_index=%v, batch_size=%v",
-			htlc.PaymentHash[:], index, l.batchCounter+1)
-
 		pkt.outgoingChanID = l.ShortChanID()
 		pkt.outgoingHTLCID = index
 		htlc.ID = index
@@ -965,27 +980,11 @@ func (l *channelLink) handleDownStreamPkt(pkt *htlcPacket, isReProcess bool) {
 		log.Debugf("Persisting keystone to create open circuit: %v->%v",
 			pkt.inKey(), pkt.outKey())
 
-		glog.Printf("Persisting keystone to create open circuit: %v->%v\n",
-			pkt.inKey(), pkt.outKey())
-
 		keystone := Keystone{
 			InKey:  pkt.inKey(),
 			OutKey: pkt.outKey(),
 		}
-
 		l.keystoneBatch = append(l.keystoneBatch, keystone)
-
-		/*
-			// Create circuit (remember the path) in order to forward settle/fail
-			// packet back.
-			if err := l.cfg.Switch.setKeystone(pkt.inKey(), pkt.outKey()); err != nil {
-				glog.Printf("setting keysonte failed: %v\n", err)
-				l.fail("unable to add full circuit: %v", err)
-				return
-			}
-		*/
-
-		glog.Printf("Sending message to peer\n")
 
 		l.cfg.Peer.SendMessage(htlc)
 
@@ -1240,13 +1239,8 @@ func (l *channelLink) handleUpstreamMsg(msg lnwire.Message) {
 			return
 		}
 
-		log.Debugf("remote height now at %v", l.channel.RemoteCommitHeight())
-		glog.Printf("remote height now at %v\n", l.channel.RemoteCommitHeight())
-
 		l.processRemoteSettleFails(settleFails)
-		glog.Printf("processed remote fails\n")
 		l.processRemoteAdds(fwdPkg, adds)
-		glog.Printf("processed remote adds\n")
 
 	case *lnwire.UpdateFee:
 		// We received fee update from peer. If we are the initiator we
@@ -1263,11 +1257,18 @@ func (l *channelLink) handleUpstreamMsg(msg lnwire.Message) {
 // commitment to their commitment chain which includes all the latest updates
 // we've received+processed up to this point.
 func (l *channelLink) updateCommitTx() error {
+	// Preemptively write all pending keystones to disk, just in case the
+	// HTLCs we have in memory are included in the subsequent attempt to
+	// sign a commitment state.
+	//
+	// TODO(conner): Trim any keystones from the circuit map for HTLCs that
+	// were written, but not never entered a commit diff.
 	err := l.cfg.Switch.setKeystones(l.keystoneBatch...)
 	if err != nil {
 		return err
 	}
 
+	// Reset the batch, but keep the backing buffer to avoid reallocating.
 	l.keystoneBatch = l.keystoneBatch[:0]
 
 	theirCommitSig, htlcSigs, err := l.channel.SignNextCommitment()
@@ -1445,8 +1446,6 @@ func (l *channelLink) String() string {
 func (l *channelLink) HandleSwitchPacket(pkt *htlcPacket) error {
 	log.Debugf("ChannelLink(%s) received switch packet inkey=%v, outkey=%v",
 		l.ShortChanID(), pkt.inKey(), pkt.outKey())
-	glog.Printf("ChannelLink(%s) received switch packet inkey=%v, outkey=%v\n",
-		l.ShortChanID(), pkt.inKey(), pkt.outKey())
 	l.mailBox.AddPacket(pkt)
 	return nil
 }
@@ -1542,8 +1541,6 @@ func (l *channelLink) processRemoteSettleFails(settleFails []*lnwallet.PaymentDe
 		}
 	}
 
-	glog.Printf("forwarding settle fails\n")
-
 	go l.forwardBatch(switchPackets...)
 }
 
@@ -1554,8 +1551,6 @@ func (l *channelLink) processRemoteSettleFails(settleFails []*lnwallet.PaymentDe
 // cancelling them, or forwarding new HTLCs to the next hop.
 func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 	lockedInHtlcs []*lnwallet.PaymentDescriptor) {
-
-	glog.Printf("link: %s fwdpkg: %v", l.ShortChanID(), fwdPkg)
 
 	var (
 		onionReaders  []io.Reader
@@ -1579,8 +1574,6 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 			rHashes = append(rHashes, pd.RHash[:])
 		}
 	}
-
-	glog.Printf("link: %s batch id: %v\n", l.ShortChanID(), fwdPkg.ID())
 
 	chanIterators, failureCodes := l.cfg.DecodeHopIterators(
 		fwdPkg.ID(), onionReaders, rHashes,
@@ -2129,7 +2122,6 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 	// Commit the htlcs we are intending to forward if this package has not
 	// been fully processed.
 	if fwdPkg.State == channeldb.FwdStateLockedIn {
-		glog.Printf("marking fwding package %d as processed", fwdPkg.Height)
 		err := l.channel.SetFwdFilter(fwdPkg.Height, fwdPkg.FwdFilter)
 		if err != nil {
 			return
@@ -2144,8 +2136,6 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 		}
 	}
 
-	glog.Printf("DONE marking fwding package %d as processed", fwdPkg.Height)
-
 	if len(switchPackets) == 0 {
 		return
 	}
@@ -2153,17 +2143,22 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 	go l.forwardBatch(switchPackets...)
 }
 
+// forwardBatch forwards the given htlcPackets to the switch, and waits on the
+// err chan for the individual responses. This method is intended to be spawned
+// as a goroutine so the responses can be handled in the background.
 func (l *channelLink) forwardBatch(packets ...*htlcPacket) {
 	errChan := l.cfg.Switch.forwardBatch(packets...)
 	l.handleBatchFwdErrs(errChan)
 }
 
+// handleBatchFwdErrs waits on the given errChan until it is closed, logging the
+// errors returned from any unsuccessful forwarding attempts.
 func (l *channelLink) handleBatchFwdErrs(errChan chan error) {
 	for {
 		err, ok := <-errChan
 		if !ok {
-			// Err chan has been drained or switch is
-			// shutting down. Either way, return.
+			// Err chan has been drained or switch is shutting down.
+			// Either way, return.
 			return
 		}
 
@@ -2173,10 +2168,6 @@ func (l *channelLink) handleBatchFwdErrs(errChan chan error) {
 
 		log.Errorf("channel link(%v): unhandled error while "+
 			"forwarding htlc packet over htlcswitch: %v",
-			l, err)
-
-		glog.Printf("channel link(%v): unhandled error while "+
-			"forwarding htlc packet over htlcswitch: %v\n",
 			l, err)
 	}
 }
