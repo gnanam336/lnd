@@ -161,6 +161,9 @@ func (r *sphinxHopIterator) ForwardingInstructions() ForwardingInfo {
 	}
 }
 
+// OnionPacket returns the onion packet from which this hop iterator is derived.
+//
+// NOTE: Part of the HopIterator interface.
 func (r *sphinxHopIterator) OnionPacket() *sphinx.OnionPacket {
 	return r.ogPacket
 }
@@ -183,10 +186,13 @@ func NewOnionProcessor(router *sphinx.Router) *OnionProcessor {
 	return &OnionProcessor{router}
 }
 
+// Start spins up the sphinx router which for processing onion packets and
+// detecting duplicate key reuse.
 func (p *OnionProcessor) Start() error {
 	return p.router.Start()
 }
 
+// Stop shutdowns the sphinx router.
 func (p *OnionProcessor) Stop() error {
 	p.router.Stop()
 	return nil
@@ -234,6 +240,13 @@ func (p *OnionProcessor) DecodeHopIterator(r io.Reader, rHash []byte) (HopIterat
 	return makeSphinxHopIterator(onionPkt, sphinxPacket), lnwire.CodeNone
 }
 
+// DecodeHopIterators performs batched decoding and validation of incoming
+// sphinx packets. For the same `id`, this method will return the same iterators
+// and failcodes upon subsequent invocations.
+//
+// NOTE: In order for the responses to be valid, the caller must guarantee that
+// the presented readers and rhashes *NEVER* deviate across invocations for the
+// same id.
 func (p *OnionProcessor) DecodeHopIterators(id []byte, rs []io.Reader,
 	rHashes [][]byte) ([]HopIterator, []lnwire.FailCode) {
 
@@ -313,6 +326,7 @@ func (p *OnionProcessor) DecodeHopIterators(id []byte, rs []io.Reader,
 			failcodes[i] = lnwire.CodeTemporaryChannelFailure
 		}
 
+		// TODO(conner): return real errors to caller so link can fail?
 		return iterators, failcodes
 	}
 
