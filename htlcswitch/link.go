@@ -2225,11 +2225,13 @@ func (l *channelLink) fail(format string, a ...interface{}) {
 	go l.cfg.Peer.Disconnect(reason)
 }
 
+// Keystone is a tuple binding an incoming and outgoing CircuitKey.
 type Keystone struct {
 	InKey  CircuitKey
 	OutKey CircuitKey
 }
 
+// String returns a human readable description of the Keystone.
 func (k *Keystone) String() string {
 	return fmt.Sprintf("%s --> %s", k.InKey, k.OutKey)
 }
