@@ -388,6 +388,9 @@ type OpenChannel struct {
 	// implementation of secret store is shachain store.
 	RevocationStore shachain.Store
 
+	// Packager is used to create and update forwarding packages for this
+	// channel, which encodes all necessary information to recover from
+	// failures and reforward HTLCs that were not fully processed.
 	Packager FwdPackager
 
 	// TODO(roasbeef): eww
@@ -840,10 +843,12 @@ type LogUpdate struct {
 	UpdateMsg lnwire.Message
 }
 
+// Encode writes a log update to the provided io.Writer.
 func (l *LogUpdate) Encode(w io.Writer) error {
 	return writeElements(w, l.LogIndex, l.UpdateMsg)
 }
 
+// Decode reads a log update from the provided io.Reader.
 func (l *LogUpdate) Decode(r io.Reader) error {
 	return readElements(r, &l.LogIndex, &l.UpdateMsg)
 }
@@ -1126,6 +1131,9 @@ func (c *OpenChannel) AdvanceCommitChainTail(fwdPkg *FwdPkg) error {
 			return err
 		}
 
+		// Lastly, we write the forwarding package to disk so that we
+		// can properly recover from failures and reforward HTLCs that
+		// have not received a corresponding settle/fail.
 		if err := c.Packager.AddFwdPkg(tx, fwdPkg); err != nil {
 			return err
 		}
@@ -1162,12 +1170,17 @@ func (c *OpenChannel) LoadFwdPkgs() ([]*FwdPkg, error) {
 	return fwdPkgs, nil
 }
 
+// SetFwdFilter atomically sets the forwarding filter for the forwarding package
+// identified by `height`.
 func (c *OpenChannel) SetFwdFilter(height uint64, fwdFilter *PkgFilter) error {
 	return c.Db.Update(func(tx *bolt.Tx) error {
 		return c.Packager.SetFwdFilter(tx, height, fwdFilter)
 	})
 }
 
+// RemoveFwdPkg atomically removes a forwarding package specified by the remote
+// commitment height.
+// NOTE: This method should only be called on packages marked FwdStateCompleted.
 func (c *OpenChannel) RemoveFwdPkg(height uint64) error {
 	return c.Db.Update(func(tx *bolt.Tx) error {
 		return c.Packager.RemovePkg(tx, height)
