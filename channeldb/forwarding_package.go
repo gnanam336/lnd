@@ -11,8 +11,9 @@ import (
 	"github.com/lightningnetwork/lnd/lnwire"
 )
 
-var ErrCorruptedFwdPkg = errors.New(
-	"fwding package has invalid on-disk structure")
+// ErrCorruptedFwdPkg signals that the on-disk structure of the forwarding
+// package has potentially been mangled.
+var ErrCorruptedFwdPkg = errors.New("fwding package db has been corrupted")
 
 // FwdState is an enum used to describe the lifecycle of a FwdPkg.
 type FwdState byte
@@ -40,19 +41,29 @@ const (
 )
 
 var (
-	// fwdPackagesKey
+	// fwdPackagesKey is the root-level bucket that all forwarding packages
+	// are written. This bucket is further subdivided based on the short
+	// channel ID of each channel.
 	fwdPackagesKey = []byte("fwd-packages")
 
-	// addBucketKey
+	// addBucketKey the bucket to which all Add log updates are written.
 	addBucketKey = []byte("add-updates")
 
-	// failSettleBucketKey
+	// failSettleBucketKey the bucket to which all Settle/Fail log updates
+	// are written.
 	failSettleBucketKey = []byte("fail-settle-updates")
 
-	// forwardedAddsKey
-	forwardedAddsKey = []byte("forwarded-adds")
+	// fwdFilterKey is a key used to write the set of Adds that passed
+	// validation and are to be forwarded to the switch.
+	// NOTE: The presence of this key within a forwarding package indicates
+	// that the package has reached FwdStateProcessed.
+	fwdFilterKey = []byte("fwd-filter-key")
 
-	// ackFilterKey
+	// ackFilterKey is a key used to access the PkgFilter indicating which
+	// Adds have received an Settle/Fail. This response may come from a
+	// number of sources, including: exitHop settle/fails, switch failures,
+	// chain arbiter interjections, as well as settle/fails from the
+	// next hop in the route.
 	ackFilterKey = []byte("ack-filter-key")
 )
 
@@ -83,24 +94,22 @@ func (f *PkgFilter) Count() uint16 {
 // Set marks the `i`-th element as included by this filter.
 // NOTE: It is assumed that i is always less than nels.
 func (f *PkgFilter) Set(i uint16) {
-	// TODO(conner): ignore if > nels to prevent panic?
-
 	byt := i / 8
 	bit := i % 8
 
 	// Set the i-th bit in the filter.
+	// TODO(conner): ignore if > nels to prevent panic?
 	f.filter[byt] = f.filter[byt] | byte(1<<(7-bit))
 }
 
 // Contains queries the filter for membership of index `i`.
 // NOTE: It is assumed that i is always less than nels.
 func (f *PkgFilter) Contains(i uint16) bool {
-	// TODO(conner): ignore if > nels to prevent panic?
-
 	byt := i / 8
 	bit := i % 8
 
 	// Read the i-th bit in the filter.
+	// TODO(conner): ignore if > nels to prevent panic?
 	shiftedBit := (f.filter[byt] >> (7 - bit)) & 0x01
 
 	return shiftedBit == 0x01
@@ -490,7 +499,7 @@ func (p *Packager) loadFwdPkg(fwdPkgBkt *bolt.Bucket, height uint64) (*FwdPkg, e
 	// Check to see if we have written the set exported filter adds to
 	// disk. If we haven't, processing of this package was never started, or
 	// failed during the last attempt.
-	fwdFilterBytes := heightBkt.Get(forwardedAddsKey)
+	fwdFilterBytes := heightBkt.Get(fwdFilterKey)
 	if fwdFilterBytes == nil {
 		fwdPkg.FwdFilter = NewPkgFilter(len(adds))
 		return fwdPkg, nil
@@ -576,7 +585,7 @@ func (p *Packager) SetFwdFilter(tx *bolt.Tx, height uint64,
 		return nil
 	}
 
-	forwardedAddsBytes := heightBkt.Get(forwardedAddsKey)
+	forwardedAddsBytes := heightBkt.Get(fwdFilterKey)
 	if forwardedAddsBytes != nil {
 		return nil
 	}
@@ -586,7 +595,7 @@ func (p *Packager) SetFwdFilter(tx *bolt.Tx, height uint64,
 		return err
 	}
 
-	return heightBkt.Put(forwardedAddsKey, b.Bytes())
+	return heightBkt.Put(fwdFilterKey, b.Bytes())
 }
 
 // AckAddHtlcs accepts a list of references to add htlcs, and updates the
@@ -610,7 +619,7 @@ func (p *Packager) AckAddHtlcs(tx *bolt.Tx, addRefs ...AddRef) error {
 
 	// Organize the forward references such that we just get a single slice
 	// of indexes for each unique height.
-	var heightDiffs = make(map[uint64][]uint16)
+	heightDiffs := make(map[uint64][]uint16)
 	for _, addRef := range addRefs {
 		if indexes, ok := heightDiffs[addRef.Height]; ok {
 			indexes = append(indexes, addRef.Index)
@@ -684,7 +693,7 @@ func (*Packager) RemoveHtlcs(tx *bolt.Tx, settleFailRefs ...SettleFailRef) error
 
 	// Organize the forward references such that we just get a single slice
 	// of indexes for each unique destination-height pair.
-	var destHeightDiffs = make(map[lnwire.ShortChannelID]map[uint64][]uint16)
+	destHeightDiffs := make(map[lnwire.ShortChannelID]map[uint64][]uint16)
 	for _, settleFailRef := range settleFailRefs {
 		destHeights, ok := destHeightDiffs[settleFailRef.Source]
 		if !ok {
@@ -764,7 +773,7 @@ func (p *Packager) RemovePkg(tx *bolt.Tx, height uint64) error {
 
 // uint16Key writes the provided 16-bit unsigned integer to a 2-byte slice.
 func uint16Key(i uint16) []byte {
-	var key = make([]byte, 2)
+	key := make([]byte, 2)
 	byteOrder.PutUint16(key, i)
 	return key
 }
