@@ -108,10 +108,6 @@ type SphinxErrorEncrypter struct {
 	ogPacket *sphinx.OnionPacket
 }
 
-func (s *SphinxErrorEncrypter) OnionPacket() *sphinx.OnionPacket {
-	return s.ogPacket
-}
-
 // NewSphinxErrorEncrypter initializes a new sphinx error encrypter as well as
 // the embedded onion error encrypter.
 func NewSphinxErrorEncrypter() *SphinxErrorEncrypter {
