@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	glog "log"
 	"runtime"
 	"strings"
 	"sync"
@@ -1492,6 +1491,9 @@ func newSingleLinkTestHarness(chanAmt, chanReserve btcutil.Amount) (
 
 	const startingHeight = 100
 	aliceLink := NewChannelLink(aliceCfg, aliceChannel, startingHeight)
+	mailbox := newMemoryMailBox()
+	mailbox.Start()
+	aliceLink.SetMailBox(mailbox)
 	if err := aliceLink.Start(); err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -1846,8 +1848,6 @@ func TestChannelLinkBandwidthConsistency(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected UpdateAddHTLC, got %T", msg)
 	}
-
-	glog.Printf("receiving htlc\n")
 
 	bobIndex, err = bobChannel.ReceiveHTLC(addHtlc)
 	if err != nil {
