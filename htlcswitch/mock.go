@@ -530,6 +530,10 @@ type mockChannelLink struct {
 
 	peer Peer
 
+	startMailBox bool
+
+	mailBox MailBox
+
 	packets chan *htlcPacket
 
 	eligible bool
@@ -563,6 +567,8 @@ func (f *mockChannelLink) completeCircuit(pkt *htlcPacket) error {
 		}
 	}
 
+	f.mailBox.AckPacket(pkt.inKey())
+
 	return nil
 }
 
@@ -578,14 +584,13 @@ func newMockChannelLink(htlcSwitch *Switch, chanID lnwire.ChannelID,
 		htlcSwitch:  htlcSwitch,
 		chanID:      chanID,
 		shortChanID: shortChanID,
-		packets:     make(chan *htlcPacket, 1),
 		peer:        peer,
 		eligible:    eligible,
 	}
 }
 
 func (f *mockChannelLink) HandleSwitchPacket(pkt *htlcPacket) error {
-	f.packets <- pkt
+	f.mailBox.AddPacket(pkt)
 	return nil
 }
 
@@ -599,12 +604,21 @@ func (f *mockChannelLink) Stats() (uint64, lnwire.MilliSatoshi, lnwire.MilliSato
 	return 0, 0, 0
 }
 
+func (f *mockChannelLink) SetMailBox(mailBox MailBox) {
+	f.mailBox = mailBox
+	f.packets = mailBox.PacketOutBox()
+}
+
+func (f *mockChannelLink) Start() error {
+	f.mailBox.Reset()
+	return nil
+}
+
 func (f *mockChannelLink) ChanID() lnwire.ChannelID                    { return f.chanID }
 func (f *mockChannelLink) ShortChanID() lnwire.ShortChannelID          { return f.shortChanID }
 func (f *mockChannelLink) UpdateShortChanID(sid lnwire.ShortChannelID) { f.shortChanID = sid }
 func (f *mockChannelLink) Bandwidth() lnwire.MilliSatoshi              { return 99999999 }
 func (f *mockChannelLink) Peer() Peer                                  { return f.peer }
-func (f *mockChannelLink) Start() error                                { return nil }
 func (f *mockChannelLink) Stop()                                       {}
 func (f *mockChannelLink) EligibleToForward() bool                     { return f.eligible }
 
