@@ -1738,7 +1738,7 @@ func TestChannelLinkBandwidthConsistency(t *testing.T) {
 	}
 
 	circuit := makePaymentCircuit(&htlc.PaymentHash, &addPkt)
-	_, err = coreLink.cfg.Switch.commitCircuits(&circuit)
+	_, _, _, err = coreLink.cfg.Switch.commitCircuits(&circuit)
 	if err != nil {
 		t.Fatalf("unable to commit circuit: %v", err)
 	}
@@ -1822,7 +1822,7 @@ func TestChannelLinkBandwidthConsistency(t *testing.T) {
 	}
 
 	circuit = makePaymentCircuit(&htlc.PaymentHash, &addPkt)
-	_, err = coreLink.cfg.Switch.commitCircuits(&circuit)
+	_, _, _, err = coreLink.cfg.Switch.commitCircuits(&circuit)
 	if err != nil {
 		t.Fatalf("unable to commit circuit: %v", err)
 	}
@@ -2030,7 +2030,7 @@ func TestChannelLinkBandwidthConsistency(t *testing.T) {
 	}
 
 	circuit = makePaymentCircuit(&htlc.PaymentHash, &addPkt)
-	_, err = coreLink.cfg.Switch.commitCircuits(&circuit)
+	_, _, _, err = coreLink.cfg.Switch.commitCircuits(&circuit)
 	if err != nil {
 		t.Fatalf("unable to commit circuit: %v", err)
 	}
@@ -2131,7 +2131,7 @@ func TestChannelLinkBandwidthConsistencyOverflow(t *testing.T) {
 			obfuscator:     NewMockObfuscator(),
 		}
 		circuit := makePaymentCircuit(&htlc.PaymentHash, addPkt)
-		_, err = coreLink.cfg.Switch.commitCircuits(&circuit)
+		_, _, _, err = coreLink.cfg.Switch.commitCircuits(&circuit)
 		if err != nil {
 			t.Fatalf("unable to commit circuit: %v", err)
 		}
@@ -2361,7 +2361,7 @@ func TestChannelLinkBandwidthChanReserve(t *testing.T) {
 		obfuscator: NewMockObfuscator(),
 	}
 	circuit := makePaymentCircuit(&htlc.PaymentHash, addPkt)
-	_, err = coreLink.cfg.Switch.commitCircuits(&circuit)
+	_, _, _, err = coreLink.cfg.Switch.commitCircuits(&circuit)
 	if err != nil {
 		t.Fatalf("unable to commit circuit: %v", err)
 	}
