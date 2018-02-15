@@ -135,7 +135,7 @@ func TestCircuitMapPersistence(t *testing.T) {
 		PaymentHash:    hash1,
 		ErrorEncrypter: htlcswitch.NewMockObfuscator(),
 	}
-	if _, err := circuitMap.CommitCircuits(circuit1); err != nil {
+	if _, _, _, err := circuitMap.CommitCircuits(circuit1); err != nil {
 		t.Fatalf("unable to add half circuit: %v", err)
 	}
 
@@ -180,7 +180,7 @@ func TestCircuitMapPersistence(t *testing.T) {
 		PaymentHash:    hash2,
 		ErrorEncrypter: htlcswitch.NewMockObfuscator(),
 	}
-	if _, err := circuitMap.CommitCircuits(circuit2); err != nil {
+	if _, _, _, err := circuitMap.CommitCircuits(circuit2); err != nil {
 		t.Fatalf("unable to add half circuit: %v", err)
 	}
 
@@ -229,7 +229,7 @@ func TestCircuitMapPersistence(t *testing.T) {
 		PaymentHash:    hash3,
 		ErrorEncrypter: htlcswitch.NewMockObfuscator(),
 	}
-	if _, err := circuitMap.CommitCircuits(circuit3); err != nil {
+	if _, _, _, err := circuitMap.CommitCircuits(circuit3); err != nil {
 		t.Fatalf("unable to add half circuit: %v", err)
 	}
 
@@ -279,7 +279,7 @@ func TestCircuitMapPersistence(t *testing.T) {
 		PaymentHash:    hash1,
 		ErrorEncrypter: htlcswitch.NewMockObfuscator(),
 	}
-	if _, err := circuitMap.CommitCircuits(circuit4); err != nil {
+	if _, _, _, err := circuitMap.CommitCircuits(circuit4); err != nil {
 		t.Fatalf("unable to add half circuit: %v", err)
 	}
 
