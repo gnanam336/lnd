@@ -277,7 +277,7 @@ func (p *OnionProcessor) DecodeHopIterators(id []byte, rs []io.Reader,
 
 		default:
 			log.Errorf("unable to decode onion packet: %v", err)
-			failcodes[i] = lnwire.CodeTemporaryChannelFailure
+			failcodes[i] = lnwire.CodeInvalidOnionKey
 			continue
 		}
 
@@ -300,7 +300,7 @@ func (p *OnionProcessor) DecodeHopIterators(id []byte, rs []io.Reader,
 
 		default:
 			log.Errorf("unable to process onion packet: %v", err)
-			failcodes[i] = lnwire.CodeTemporaryChannelFailure
+			failcodes[i] = lnwire.CodeInvalidOnionKey
 			continue
 		}
 	}
