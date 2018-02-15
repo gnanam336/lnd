@@ -144,7 +144,7 @@ var (
 	chanID = lnwire.NewChanIDFromOutPoint(&wire.OutPoint{})
 
 	adds = []channeldb.LogUpdate{
-		channeldb.LogUpdate{
+		{
 			LogIndex: 0,
 			UpdateMsg: &lnwire.UpdateAddHTLC{
 				ChanID:      chanID,
@@ -154,7 +154,7 @@ var (
 				PaymentHash: [32]byte{0},
 			},
 		},
-		channeldb.LogUpdate{
+		{
 			LogIndex: 1,
 			UpdateMsg: &lnwire.UpdateAddHTLC{
 				ChanID:      chanID,
@@ -167,7 +167,7 @@ var (
 	}
 
 	settleFails = []channeldb.LogUpdate{
-		channeldb.LogUpdate{
+		{
 			LogIndex: 2,
 			UpdateMsg: &lnwire.UpdateFulfillHTLC{
 				ChanID:          chanID,
@@ -175,7 +175,7 @@ var (
 				PaymentPreimage: [32]byte{0},
 			},
 		},
-		channeldb.LogUpdate{
+		{
 			LogIndex: 3,
 			UpdateMsg: &lnwire.UpdateFailHTLC{
 				ChanID: chanID,
