@@ -98,6 +98,8 @@ type ChannelLink interface {
 	// will use this function in forwarding decisions accordingly.
 	EligibleToForward() bool
 
+	SetMailBox(MailBox)
+
 	// Start/Stop are used to initiate the start/stop of the channel link
 	// functioning.
 	Start() error
