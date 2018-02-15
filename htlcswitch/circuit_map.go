@@ -2,7 +2,6 @@ package htlcswitch
 
 import (
 	"bytes"
-	glog "log"
 	"sync"
 
 	"github.com/boltdb/bolt"
@@ -42,7 +41,8 @@ var (
 type CircuitMap interface {
 	// CommitCircuits attempts to add the given circuit's to the circuit
 	// map, returning a list of the circuits that had not been seen prior.
-	CommitCircuits(circuit ...*PaymentCircuit) ([]*PaymentCircuit, error)
+	CommitCircuits(circuit ...*PaymentCircuit) ([]*PaymentCircuit,
+		[]*PaymentCircuit, []*PaymentCircuit, error)
 
 	// NumPending returns the total number of active circuits added by
 	// CommitCircuits.
@@ -317,12 +317,12 @@ func (cm *circuitMap) LookupByPaymentHash(hash [32]byte) []*PaymentCircuit {
 // NOTE: This method uses batched writes to improve performance, gains will only
 // be realized if it is called concurrently from separate goroutines. This
 // method is intended to be called in the htlcManager of each link.
-func (cm *circuitMap) CommitCircuits(
-	circuits ...*PaymentCircuit) ([]*PaymentCircuit, error) {
+func (cm *circuitMap) CommitCircuits(circuits ...*PaymentCircuit,
+) ([]*PaymentCircuit, []*PaymentCircuit, []*PaymentCircuit, error) {
 
 	// If an empty list was passed, return early to avoid grabbing the lock.
 	if len(circuits) == 0 {
-		return nil, nil
+		return nil, nil, nil, nil
 	}
 
 	// First, we reconcile the provided circuits with our set of pending
@@ -331,26 +331,34 @@ func (cm *circuitMap) CommitCircuits(
 	// exact circuit to be forwarded through the switch. If a circuit is
 	// already pending, the htlc will be reforwarded by the switch.
 	cm.mtx.Lock()
-	var circuitsToAdd []*PaymentCircuit
+	var adds, drops, fails, addFails []*PaymentCircuit
 	for _, circuit := range circuits {
 		inKey := circuit.InKey()
-		if _, ok := cm.pending[inKey]; !ok {
+		if foundCircuit, ok := cm.pending[inKey]; ok {
+			if foundCircuit.HasKeystone() {
+				drops = append(drops, circuit)
+			} else {
+				fails = append(fails, circuit)
+				addFails = append(addFails, circuit)
+			}
+		} else {
 			cm.pending[inKey] = circuit
-			circuitsToAdd = append(circuitsToAdd, circuit)
+			adds = append(adds, circuit)
+			addFails = append(addFails, circuit)
 		}
 	}
 	cm.mtx.Unlock()
 
-	// If all circuits were previously started, we are done.
-	if len(circuitsToAdd) == 0 {
-		return nil, nil
+	// If all circuits are dropped or failed, we are done.
+	if len(adds) == 0 {
+		return nil, drops, fails, nil
 	}
 
 	// Now, optimistically serialize the circuits to add.
-	var bs = make([]bytes.Buffer, len(circuitsToAdd))
-	for i, circuit := range circuitsToAdd {
+	var bs = make([]bytes.Buffer, len(adds))
+	for i, circuit := range adds {
 		if err := circuit.Encode(&bs[i]); err != nil {
-			return nil, err
+			return nil, drops, addFails, err
 		}
 	}
 
@@ -363,7 +371,7 @@ func (cm *circuitMap) CommitCircuits(
 			return ErrCorruptedCircuitMap
 		}
 
-		for i, circuit := range circuitsToAdd {
+		for i, circuit := range adds {
 			inKeyBytes := circuit.InKey().Bytes()
 			circuitBytes := bs[i].Bytes()
 
@@ -378,13 +386,13 @@ func (cm *circuitMap) CommitCircuits(
 
 	// Return if the write succeeded.
 	if err == nil {
-		return circuitsToAdd, nil
+		return adds, drops, fails, nil
 	}
 
 	// Otherwise, rollback the circuits added to the pending set if the
 	// write failed.
 	cm.mtx.Lock()
-	for _, circuit := range circuitsToAdd {
+	for _, circuit := range adds {
 		inKey := circuit.InKey()
 		if _, ok := cm.pending[inKey]; !ok {
 			delete(cm.pending, inKey)
@@ -392,7 +400,7 @@ func (cm *circuitMap) CommitCircuits(
 	}
 	cm.mtx.Unlock()
 
-	return nil, err
+	return nil, drops, addFails, err
 }
 
 // SetKeystone sets the outgoing circuit key for the circuit identified by
@@ -447,10 +455,6 @@ func (cm *circuitMap) SetKeystone(inKey, outKey CircuitKey) error {
 func (cm *circuitMap) SetKeystones(keystones ...Keystone) error {
 	if len(keystones) == 0 {
 		return nil
-	}
-
-	for i, ks := range keystones {
-		glog.Printf("setting keystone #%d: %s", i, ks)
 	}
 
 	cm.mtx.RLock()
