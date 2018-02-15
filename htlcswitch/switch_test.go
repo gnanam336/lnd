@@ -657,6 +657,8 @@ func TestSwitchForwardDropAfterFullAdd(t *testing.T) {
 	select {
 	case <-aliceChannelLink.packets:
 		t.Fatal("request should not have returned to source")
+	case <-bobChannelLink.packets:
+		t.Fatal("request should not have forwarded to destination")
 	case <-time.After(time.Second):
 	}
 }
