@@ -517,8 +517,8 @@ func (p *Packager) loadFwdPkg(fwdPkgBkt *bolt.Bucket, height uint64) (*FwdPkg, e
 
 	// If not every add has been acked in this package, we still need to
 	// reprocess it in order to make sure the unacked adds get added to the
-	// switch or go back to the remote peer. Indexes already in the ack
-	// filter will be ignored during reprocessing.
+	// switch or get processed locally. Indexes already in the ack filter
+	// will be ignored during reprocessing.
 	if !fwdPkg.AckFilter.IsFull() {
 		return fwdPkg, nil
 	}
