@@ -257,11 +257,15 @@ type channelLink struct {
 	// been processed because of the commitment transaction overflow.
 	overflowQueue *packetQueue
 
+	// startMailBox directs whether or not to start the mailbox when
+	// starting the link. It may have already been started by the switch.
+	startMailBox bool
+
 	// mailBox is the main interface between the outside world and the
 	// link. All incoming messages will be sent over this mailBox. Messages
 	// include new updates from our connected peer, and new packets to be
 	// forwarded sent by the switch.
-	mailBox *memoryMailBox
+	mailBox MailBox
 
 	// upstream is a channel that new messages sent from the remote peer to
 	// the local peer will be sent across.
@@ -300,11 +304,10 @@ type channelLink struct {
 func NewChannelLink(cfg ChannelLinkConfig, channel *lnwallet.LightningChannel,
 	currentHeight uint32) ChannelLink {
 
-	link := &channelLink{
+	return &channelLink{
 		cfg:         cfg,
 		channel:     channel,
 		shortChanID: channel.ShortChanID(),
-		mailBox:     newMemoryMailBox(),
 		linkControl: make(chan interface{}),
 		// TODO(roasbeef): just do reserve here?
 		logCommitTimer: time.NewTimer(300 * time.Millisecond),
@@ -313,11 +316,6 @@ func NewChannelLink(cfg ChannelLinkConfig, channel *lnwallet.LightningChannel,
 		htlcUpdates:    make(chan []channeldb.HTLC),
 		quit:           make(chan struct{}),
 	}
-
-	link.upstream = link.mailBox.MessageOutBox()
-	link.downstream = link.mailBox.PacketOutBox()
-
-	return link
 }
 
 // A compile time check to ensure channelLink implements the ChannelLink
@@ -352,7 +350,7 @@ func (l *channelLink) Start() error {
 		}
 	}()
 
-	l.mailBox.Start()
+	l.mailBox.Reset()
 	l.overflowQueue.Start()
 
 	l.wg.Add(1)
@@ -379,7 +377,6 @@ func (l *channelLink) Stop() {
 
 	l.channel.Stop()
 
-	l.mailBox.Stop()
 	l.overflowQueue.Stop()
 
 	close(l.quit)
@@ -986,6 +983,8 @@ func (l *channelLink) handleDownStreamPkt(pkt *htlcPacket, isReProcess bool) {
 		}
 		l.keystoneBatch = append(l.keystoneBatch, keystone)
 
+		l.mailBox.AckPacket(pkt.inKey())
+
 		l.cfg.Peer.SendMessage(htlc)
 
 	case *lnwire.UpdateFulfillHTLC:
@@ -1015,6 +1014,8 @@ func (l *channelLink) handleDownStreamPkt(pkt *htlcPacket, isReProcess bool) {
 		// cancelled.
 		htlc.ChanID = l.ChanID()
 		htlc.ID = pkt.incomingHTLCID
+
+		l.mailBox.AckPacket(pkt.inKey())
 
 		// Then we send the HTLC settle message to the connected peer
 		// so we can continue the propagation of the settle message.
@@ -1047,6 +1048,8 @@ func (l *channelLink) handleDownStreamPkt(pkt *htlcPacket, isReProcess bool) {
 		// within the switch.
 		htlc.ChanID = l.ChanID()
 		htlc.ID = pkt.incomingHTLCID
+
+		l.mailBox.AckPacket(pkt.inKey())
 
 		// Finally, we send the HTLC message to the peer which
 		// initially created the HTLC.
@@ -1385,6 +1388,14 @@ func (l *channelLink) Bandwidth() lnwire.MilliSatoshi {
 	// this point is the available balance minus the reserve amount
 	// we are required to keep as collateral.
 	return linkBandwidth - reserve
+}
+
+func (l *channelLink) SetMailBox(mailbox MailBox) {
+	l.Lock()
+	l.mailBox = mailbox
+	l.upstream = mailbox.MessageOutBox()
+	l.downstream = mailbox.PacketOutBox()
+	l.Unlock()
 }
 
 // policyUpdate is a message sent to a channel link when an outside sub-system
