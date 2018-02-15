@@ -742,9 +742,15 @@ func removeHtlcsAtHeight(destBkt *bolt.Bucket, height uint64,
 		return nil
 	}
 
+	// Write SETTLE/FAIL updates we received at this commit height.
+	settleFailBkt := heightBkt.Bucket(failSettleBucketKey)
+	if settleFailBkt == nil {
+		return nil
+	}
+
 	// Remove the htlcs at this height based on the provided indexes.
 	for _, index := range indexes {
-		if err := heightBkt.Delete(uint16Key(index)); err != nil {
+		if err := settleFailBkt.Delete(uint16Key(index)); err != nil {
 			return err
 		}
 	}
