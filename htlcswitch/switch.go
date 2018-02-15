@@ -155,6 +155,10 @@ type Switch struct {
 	// this channel.
 	linkIndex map[lnwire.ChannelID]ChannelLink
 
+	// mailboxes is a map of channel id to mailboxes, which allows the
+	// switch to buffer messages for peers that have not come back online.
+	mailboxes map[lnwire.ShortChannelID]MailBox
+
 	// forwardingIndex is an index which is consulted by the switch when it
 	// needs to locate the next hop to forward an incoming/outgoing HTLC
 	// update to/from.
@@ -204,6 +208,7 @@ func New(cfg Config) (*Switch, error) {
 		circuits:          circuitMap,
 		paymentSequencer:  sequencer,
 		linkIndex:         make(map[lnwire.ChannelID]ChannelLink),
+		mailboxes:         make(map[lnwire.ShortChannelID]MailBox),
 		forwardingIndex:   make(map[lnwire.ShortChannelID]ChannelLink),
 		interfaceIndex:    make(map[[33]byte]map[ChannelLink]struct{}),
 		pendingPayments:   make(map[uint64]*pendingPayment),
@@ -918,6 +923,8 @@ func (s *Switch) handlePacketForward(packet *htlcPacket) error {
 
 		source, err := s.getLinkByShortID(packet.incomingChanID)
 		if err != nil {
+			sourceMailbox := s.getOrCreateMailBox(packet.incomingChanID)
+			sourceMailbox.AddPacket(packet)
 			err := errors.Errorf("Unable to get source channel "+
 				"link to forward HTLC settle/fail: %v", err)
 			log.Error(err)
@@ -1371,6 +1378,11 @@ func (s *Switch) Stop() error {
 	log.Infof("HTLC Switch shutting down")
 
 	close(s.quit)
+
+	for _, mailBox := range s.mailboxes {
+		mailBox.Stop()
+	}
+
 	s.wg.Wait()
 
 	s.cfg.DB.Close()
@@ -1426,6 +1438,14 @@ func (s *Switch) addLink(link ChannelLink) error {
 	}
 	s.interfaceIndex[peerPub][link] = struct{}{}
 
+	// Get the mailbox for this link, which buffers packets in case there
+	// packets that we tried to deliver while this link was offline.
+	mailbox := s.getOrCreateMailBox(link.ShortChanID())
+
+	// Give the link its mailbox, we only need to start the mailbox if it
+	// wasn't previously found.
+	link.SetMailBox(mailbox)
+
 	if err := link.Start(); err != nil {
 		s.removeLink(link.ChanID())
 		return err
@@ -1435,6 +1455,19 @@ func (s *Switch) addLink(link ChannelLink) error {
 		link.ChanID(), spew.Sdump(link.ShortChanID()))
 
 	return nil
+}
+
+func (s *Switch) getOrCreateMailBox(chanID lnwire.ShortChannelID) MailBox {
+	// Check to see if we have a mailbox already populated for this link. If
+	// not, we'll make a new one.
+	mailbox, ok := s.mailboxes[chanID]
+	if !ok {
+		mailbox = newMemoryMailBox()
+		mailbox.Start()
+		s.mailboxes[chanID] = mailbox
+	}
+
+	return mailbox
 }
 
 // getLinkCmd is a get link command wrapper, it is used to propagate handler
