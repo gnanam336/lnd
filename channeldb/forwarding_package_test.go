@@ -221,6 +221,7 @@ func TestPackagerEmptyFwdPkg(t *testing.T) {
 		t.Fatalf("expected 1 fwdpkg, instead found %d", len(fwdPkgs))
 	}
 	assertFwdPkgState(t, fwdPkgs[0], channeldb.FwdStateLockedIn)
+	assertFwdPkgNumAddsSettleFails(t, fwdPkgs[0], 0, 0)
 	assertAckFilterIsFull(t, fwdPkgs[0], true)
 
 	// Now, write the forwarding decision. In this case, its just an empty
@@ -239,6 +240,7 @@ func TestPackagerEmptyFwdPkg(t *testing.T) {
 		t.Fatalf("expected 1 fwdpkg, instead found %d", len(fwdPkgs))
 	}
 	assertFwdPkgState(t, fwdPkgs[0], channeldb.FwdStateCompleted)
+	assertFwdPkgNumAddsSettleFails(t, fwdPkgs[0], 0, 0)
 	assertAckFilterIsFull(t, fwdPkgs[0], true)
 
 	// Lastly, remove the completed forwarding package from disk.
@@ -291,6 +293,7 @@ func TestPackagerOnlyAdds(t *testing.T) {
 		t.Fatalf("expected 1 fwdpkg, instead found %d", len(fwdPkgs))
 	}
 	assertFwdPkgState(t, fwdPkgs[0], channeldb.FwdStateLockedIn)
+	assertFwdPkgNumAddsSettleFails(t, fwdPkgs[0], len(adds), 0)
 	assertAckFilterIsFull(t, fwdPkgs[0], false)
 
 	// Now, write the forwarding decision. Since we have not explicitly
@@ -313,6 +316,7 @@ func TestPackagerOnlyAdds(t *testing.T) {
 			t.Fatalf("expected 1 fwdpkg, instead found %d", len(fwdPkgs))
 		}
 		assertFwdPkgState(t, fwdPkgs[0], channeldb.FwdStateProcessed)
+		assertFwdPkgNumAddsSettleFails(t, fwdPkgs[0], len(adds), 0)
 		assertAckFilterIsFull(t, fwdPkgs[0], false)
 
 		addRef := channeldb.AddRef{
@@ -335,6 +339,7 @@ func TestPackagerOnlyAdds(t *testing.T) {
 		t.Fatalf("expected 1 fwdpkg, instead found %d", len(fwdPkgs))
 	}
 	assertFwdPkgState(t, fwdPkgs[0], channeldb.FwdStateCompleted)
+	assertFwdPkgNumAddsSettleFails(t, fwdPkgs[0], len(adds), 0)
 	assertAckFilterIsFull(t, fwdPkgs[0], true)
 
 	// Lastly, remove the completed forwarding package from disk.
@@ -388,6 +393,7 @@ func TestPackagerOnlySettleFails(t *testing.T) {
 		t.Fatalf("expected 1 fwdpkg, instead found %d", len(fwdPkgs))
 	}
 	assertFwdPkgState(t, fwdPkgs[0], channeldb.FwdStateLockedIn)
+	assertFwdPkgNumAddsSettleFails(t, fwdPkgs[0], 0, len(settleFails))
 	assertAckFilterIsFull(t, fwdPkgs[0], true)
 
 	// Now, write the forwarding decision. Since we have not explicitly
@@ -410,6 +416,7 @@ func TestPackagerOnlySettleFails(t *testing.T) {
 			t.Fatalf("expected 1 fwdpkg, instead found %d", len(fwdPkgs))
 		}
 		assertFwdPkgState(t, fwdPkgs[0], channeldb.FwdStateFullyAcked)
+		assertFwdPkgNumAddsSettleFails(t, fwdPkgs[0], 0, len(settleFails)-i)
 		assertAckFilterIsFull(t, fwdPkgs[0], true)
 
 		failSettleRef := channeldb.SettleFailRef{
@@ -433,6 +440,7 @@ func TestPackagerOnlySettleFails(t *testing.T) {
 		t.Fatalf("expected 1 fwdpkg, instead found %d", len(fwdPkgs))
 	}
 	assertFwdPkgState(t, fwdPkgs[0], channeldb.FwdStateCompleted)
+	assertFwdPkgNumAddsSettleFails(t, fwdPkgs[0], 0, 0)
 	assertAckFilterIsFull(t, fwdPkgs[0], true)
 
 	// Lastly, remove the completed forwarding package from disk.
@@ -485,6 +493,7 @@ func TestPackagerAddsThenSettleFails(t *testing.T) {
 		t.Fatalf("expected 1 fwdpkg, instead found %d", len(fwdPkgs))
 	}
 	assertFwdPkgState(t, fwdPkgs[0], channeldb.FwdStateLockedIn)
+	assertFwdPkgNumAddsSettleFails(t, fwdPkgs[0], len(adds), len(settleFails))
 	assertAckFilterIsFull(t, fwdPkgs[0], false)
 
 	// Now, write the forwarding decision. Since we have not explicitly
@@ -507,6 +516,7 @@ func TestPackagerAddsThenSettleFails(t *testing.T) {
 			t.Fatalf("expected 1 fwdpkg, instead found %d", len(fwdPkgs))
 		}
 		assertFwdPkgState(t, fwdPkgs[0], channeldb.FwdStateProcessed)
+		assertFwdPkgNumAddsSettleFails(t, fwdPkgs[0], len(adds), len(settleFails))
 		assertAckFilterIsFull(t, fwdPkgs[0], false)
 
 		addRef := channeldb.AddRef{
@@ -531,6 +541,7 @@ func TestPackagerAddsThenSettleFails(t *testing.T) {
 			t.Fatalf("expected 1 fwdpkg, instead found %d", len(fwdPkgs))
 		}
 		assertFwdPkgState(t, fwdPkgs[0], channeldb.FwdStateFullyAcked)
+		assertFwdPkgNumAddsSettleFails(t, fwdPkgs[0], len(adds), len(settleFails)-i)
 		assertAckFilterIsFull(t, fwdPkgs[0], true)
 
 		failSettleRef := channeldb.SettleFailRef{
@@ -554,6 +565,7 @@ func TestPackagerAddsThenSettleFails(t *testing.T) {
 		t.Fatalf("expected 1 fwdpkg, instead found %d", len(fwdPkgs))
 	}
 	assertFwdPkgState(t, fwdPkgs[0], channeldb.FwdStateCompleted)
+	assertFwdPkgNumAddsSettleFails(t, fwdPkgs[0], len(adds), 0)
 	assertAckFilterIsFull(t, fwdPkgs[0], true)
 
 	// Lastly, remove the completed forwarding package from disk.
@@ -590,8 +602,8 @@ func TestPackagerSettleFailsThenAdds(t *testing.T) {
 		t.Fatalf("no forwarding packages should exist, found %d", len(fwdPkgs))
 	}
 
-	// Next, create and write a new forwarding package that only has add
-	// htlcs.
+	// Next, create and write a new forwarding package that has both add
+	// and settle/fail htlcs.
 	fwdPkg := channeldb.NewFwdPkg(shortChanID, 0, adds, settleFails)
 
 	if err := db.Update(func(tx *bolt.Tx) error {
@@ -608,6 +620,7 @@ func TestPackagerSettleFailsThenAdds(t *testing.T) {
 		t.Fatalf("expected 1 fwdpkg, instead found %d", len(fwdPkgs))
 	}
 	assertFwdPkgState(t, fwdPkgs[0], channeldb.FwdStateLockedIn)
+	assertFwdPkgNumAddsSettleFails(t, fwdPkgs[0], len(adds), len(settleFails))
 	assertAckFilterIsFull(t, fwdPkgs[0], false)
 
 	// Now, write the forwarding decision. Since we have not explicitly
@@ -620,16 +633,20 @@ func TestPackagerSettleFailsThenAdds(t *testing.T) {
 		t.Fatalf("unable to set fwdfiter: %v", err)
 	}
 
+	// Simulate another channel deleting the settle/fails it received from
+	// the original fwd pkg.
+	// TODO(conner): use different packager/s?
 	for i := range settleFails {
 		// We should still have one package on disk. Since the
 		// forwarding decision has been written, it will minimally be in
-		// FwdStateProcessed.  However not allf of the HTLCs have been
-		// acked, so should not have advanced further.
+		// FwdStateProcessed.  However none all of the add HTLCs have
+		// been acked, so should not have advanced further.
 		fwdPkgs = loadFwdPkgs(t, db, packager)
 		if len(fwdPkgs) != 1 {
 			t.Fatalf("expected 1 fwdpkg, instead found %d", len(fwdPkgs))
 		}
 		assertFwdPkgState(t, fwdPkgs[0], channeldb.FwdStateProcessed)
+		assertFwdPkgNumAddsSettleFails(t, fwdPkgs[0], len(adds), len(settleFails)-i)
 		assertAckFilterIsFull(t, fwdPkgs[0], false)
 
 		failSettleRef := channeldb.SettleFailRef{
@@ -645,16 +662,18 @@ func TestPackagerSettleFailsThenAdds(t *testing.T) {
 		}
 	}
 
+	// Now simulate this channel receiving a fail/settle for the adds in the
+	// fwdpkg.
 	for i := range adds {
-		// We should still have one package on disk. Since the forwarding
-		// decision has been written, it will minimally be in FwdStateProcessed.
-		// However not allf of the HTLCs have been acked, so should not
-		// have advanced further.
+		// Again, we should still have one package on disk and be in
+		// FwdStateProcessed. This should not change until all of the
+		// add htlcs have been acked.
 		fwdPkgs = loadFwdPkgs(t, db, packager)
 		if len(fwdPkgs) != 1 {
 			t.Fatalf("expected 1 fwdpkg, instead found %d", len(fwdPkgs))
 		}
 		assertFwdPkgState(t, fwdPkgs[0], channeldb.FwdStateProcessed)
+		assertFwdPkgNumAddsSettleFails(t, fwdPkgs[0], len(adds), 0)
 		assertAckFilterIsFull(t, fwdPkgs[0], false)
 
 		addRef := channeldb.AddRef{
@@ -677,6 +696,7 @@ func TestPackagerSettleFailsThenAdds(t *testing.T) {
 		t.Fatalf("expected 1 fwdpkg, instead found %d", len(fwdPkgs))
 	}
 	assertFwdPkgState(t, fwdPkgs[0], channeldb.FwdStateCompleted)
+	assertFwdPkgNumAddsSettleFails(t, fwdPkgs[0], len(adds), 0)
 	assertAckFilterIsFull(t, fwdPkgs[0], true)
 
 	// Lastly, remove the completed forwarding package from disk.
