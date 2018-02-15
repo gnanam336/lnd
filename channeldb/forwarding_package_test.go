@@ -2,21 +2,70 @@ package channeldb_test
 
 import (
 	"bytes"
+	"io/ioutil"
+	"path/filepath"
+	"runtime"
 	"testing"
 
+	"github.com/boltdb/bolt"
 	"github.com/lightningnetwork/lnd/channeldb"
+	"github.com/lightningnetwork/lnd/lnwire"
+	"github.com/roasbeef/btcd/wire"
 )
 
 // TestPkgFilterBruteForce tests the behavior of a pkg filter up to size 1000,
 // which is greater than the number of HTLCs we permit on a commitment txn.
 // This should encapsulate every potential filter used in practice.
 func TestPkgFilterBruteForce(t *testing.T) {
+	t.Parallel()
+
 	checkPkgFilterRange(t, 1000)
+}
+
+// checkPkgFilterRange verifies the behavior of a pkg filter when doing a linear
+// insertion of `high` elements. This is primarily to test that IsFull functions
+// properly for all relevant sizes of `high`.
+func checkPkgFilterRange(t *testing.T, high int) {
+	for i := uint16(0); i < uint16(high); i++ {
+		f := channeldb.NewPkgFilter(int(i))
+
+		if f.Count() != i {
+			t.Fatalf("pkg filter count=%d is actually %d",
+				i, f.Count())
+		}
+		checkPkgFilterEncodeDecode(t, i, f)
+
+		for j := uint16(0); j < i; j++ {
+			if f.Contains(j) {
+				t.Fatalf("pkg filter count=%d contains %d "+
+					"before being added", i, j)
+			}
+
+			f.Set(j)
+			checkPkgFilterEncodeDecode(t, i, f)
+
+			if !f.Contains(j) {
+				t.Fatalf("pkg filter count=%d missing %d "+
+					"after being added", i, j)
+			}
+
+			if j < i-1 && f.IsFull() {
+				t.Fatalf("pkg filter count=%d already full", i)
+			}
+		}
+
+		if !f.IsFull() {
+			t.Fatalf("pkg filter count=%d not full", i)
+		}
+		checkPkgFilterEncodeDecode(t, i, f)
+	}
 }
 
 // TestPkgFilterRand uses a random permutation to verify the proper behavior of
 // the pkg filter if the entries are not inserted in-order.
 func TestPkgFilterRand(t *testing.T) {
+	t.Parallel()
+
 	checkPkgFilterRand(t, 3, 17)
 }
 
@@ -59,45 +108,6 @@ func checkPkgFilterRand(t *testing.T, b, p uint16) {
 	checkPkgFilterEncodeDecode(t, p, f)
 }
 
-// checkPkgFilterRange verifies the behavior of a pkg filter when doing a linear
-// insertion of `high` elements. This is primarily to test that IsFull functions
-// properly for all relevant sizes of `high`.
-func checkPkgFilterRange(t *testing.T, high int) {
-	for i := uint16(0); i < uint16(high); i++ {
-		f := channeldb.NewPkgFilter(int(i))
-
-		if f.Count() != i {
-			t.Fatalf("pkg filter count=%d is actually %d",
-				i, f.Count())
-		}
-		checkPkgFilterEncodeDecode(t, i, f)
-
-		for j := uint16(0); j < i; j++ {
-			if f.Contains(j) {
-				t.Fatalf("pkg filter count=%d contains %d "+
-					"before being added", i, j)
-			}
-
-			f.Set(j)
-			checkPkgFilterEncodeDecode(t, i, f)
-
-			if !f.Contains(j) {
-				t.Fatalf("pkg filter count=%d missing %d "+
-					"after being added", i, j)
-			}
-
-			if j < i-1 && f.IsFull() {
-				t.Fatalf("pkg filter count=%d already full", i)
-			}
-		}
-
-		if !f.IsFull() {
-			t.Fatalf("pkg filter count=%d not full", i)
-		}
-		checkPkgFilterEncodeDecode(t, i, f)
-	}
-}
-
 // checkPkgFilterEncodeDecode tests the serialization of a pkg filter by:
 //   1) writing it to a buffer
 //   2) verifying the number of bytes written matches the filter's Size()
@@ -128,4 +138,632 @@ func checkPkgFilterEncodeDecode(t *testing.T, i uint16, f *channeldb.PkgFilter) 
 			"after deserialization, want: %v, got %v",
 			i, f, f2)
 	}
+}
+
+var (
+	chanID = lnwire.NewChanIDFromOutPoint(&wire.OutPoint{})
+
+	adds = []channeldb.LogUpdate{
+		channeldb.LogUpdate{
+			LogIndex: 0,
+			UpdateMsg: &lnwire.UpdateAddHTLC{
+				ChanID:      chanID,
+				ID:          1,
+				Amount:      100,
+				Expiry:      1000,
+				PaymentHash: [32]byte{0},
+			},
+		},
+		channeldb.LogUpdate{
+			LogIndex: 1,
+			UpdateMsg: &lnwire.UpdateAddHTLC{
+				ChanID:      chanID,
+				ID:          1,
+				Amount:      101,
+				Expiry:      1001,
+				PaymentHash: [32]byte{1},
+			},
+		},
+	}
+
+	settleFails = []channeldb.LogUpdate{
+		channeldb.LogUpdate{
+			LogIndex: 2,
+			UpdateMsg: &lnwire.UpdateFulfillHTLC{
+				ChanID:          chanID,
+				ID:              0,
+				PaymentPreimage: [32]byte{0},
+			},
+		},
+		channeldb.LogUpdate{
+			LogIndex: 3,
+			UpdateMsg: &lnwire.UpdateFailHTLC{
+				ChanID: chanID,
+				ID:     1,
+				Reason: []byte{},
+			},
+		},
+	}
+)
+
+// TestPackagerEmptyFwdPkg checks that the state transitions exhibted by a
+// forwarding package that contains no adds, fails or settles. We expect that
+// the fwdpkg reaches FwdStateCompleted immediately after writing the forwarding
+// decision via SetFwdFilter.
+func TestPackagerEmptyFwdPkg(t *testing.T) {
+	t.Parallel()
+
+	db := makeFwdPkgDB(t, "")
+
+	shortChanID := lnwire.NewShortChanIDFromInt(1)
+	packager := channeldb.NewPackager(shortChanID)
+
+	// To begin, there should be no forwarding packages on disk.
+	fwdPkgs := loadFwdPkgs(t, db, packager)
+	if len(fwdPkgs) != 0 {
+		t.Fatalf("no forwarding packages should exist, found %d", len(fwdPkgs))
+	}
+
+	// Next, create and write a new forwarding package with no htlcs.
+	fwdPkg := channeldb.NewFwdPkg(shortChanID, 0, nil, nil)
+
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return packager.AddFwdPkg(tx, fwdPkg)
+	}); err != nil {
+		t.Fatalf("unable to add fwd pkg: %v", err)
+	}
+
+	// There should now be one fwdpkg on disk. Since no forwarding decision
+	// has been written, we expect it to be FwdStateLockedIn. With no HTLCs,
+	// the ack filter will have no elements, and should always return true.
+	fwdPkgs = loadFwdPkgs(t, db, packager)
+	if len(fwdPkgs) != 1 {
+		t.Fatalf("expected 1 fwdpkg, instead found %d", len(fwdPkgs))
+	}
+	assertFwdPkgState(t, fwdPkgs[0], channeldb.FwdStateLockedIn)
+	assertAckFilterIsFull(t, fwdPkgs[0], true)
+
+	// Now, write the forwarding decision. In this case, its just an empty
+	// fwd filter.
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return packager.SetFwdFilter(tx, fwdPkg.Height, fwdPkg.FwdFilter)
+	}); err != nil {
+		t.Fatalf("unable to set fwdfiter: %v", err)
+	}
+
+	// We should still have one package on disk. Since the forwarding
+	// decision has been written, it will minimally be in FwdStateProcessed.
+	// However with no htlcs, it should leap frog to FwdStateCompleted.
+	fwdPkgs = loadFwdPkgs(t, db, packager)
+	if len(fwdPkgs) != 1 {
+		t.Fatalf("expected 1 fwdpkg, instead found %d", len(fwdPkgs))
+	}
+	assertFwdPkgState(t, fwdPkgs[0], channeldb.FwdStateCompleted)
+	assertAckFilterIsFull(t, fwdPkgs[0], true)
+
+	// Lastly, remove the completed forwarding package from disk.
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return packager.RemovePkg(tx, fwdPkg.Height)
+	}); err != nil {
+		t.Fatalf("unable to remove fwdpkg: %v", err)
+	}
+
+	// Check that the fwd package was actually removed.
+	fwdPkgs = loadFwdPkgs(t, db, packager)
+	if len(fwdPkgs) != 0 {
+		t.Fatalf("no forwarding packages should exist, found %d", len(fwdPkgs))
+	}
+}
+
+// TestPackagerOnlyAdds checks that the fwdpkg does not reach FwdStateCompleted
+// until the adds in the package have been acked using AckAddHtlcs. This is
+// because there are no settles or fails, so as soon as the package reaches
+// FwdStateFullyAcked, it is promoted to FwdStateCompleted.
+func TestPackagerOnlyAdds(t *testing.T) {
+	t.Parallel()
+
+	db := makeFwdPkgDB(t, "")
+
+	shortChanID := lnwire.NewShortChanIDFromInt(1)
+	packager := channeldb.NewPackager(shortChanID)
+
+	// To begin, there should be no forwarding packages on disk.
+	fwdPkgs := loadFwdPkgs(t, db, packager)
+	if len(fwdPkgs) != 0 {
+		t.Fatalf("no forwarding packages should exist, found %d", len(fwdPkgs))
+	}
+
+	// Next, create and write a new forwarding package that only has add
+	// htlcs.
+	fwdPkg := channeldb.NewFwdPkg(shortChanID, 0, adds, nil)
+
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return packager.AddFwdPkg(tx, fwdPkg)
+	}); err != nil {
+		t.Fatalf("unable to add fwd pkg: %v", err)
+	}
+
+	// There should now be one fwdpkg on disk. Since no forwarding decision
+	// has been written, we expect it to be FwdStateLockedIn. The package
+	// has unacked add HTLCs, so the ack filter should not be full.
+	fwdPkgs = loadFwdPkgs(t, db, packager)
+	if len(fwdPkgs) != 1 {
+		t.Fatalf("expected 1 fwdpkg, instead found %d", len(fwdPkgs))
+	}
+	assertFwdPkgState(t, fwdPkgs[0], channeldb.FwdStateLockedIn)
+	assertAckFilterIsFull(t, fwdPkgs[0], false)
+
+	// Now, write the forwarding decision. Since we have not explicitly
+	// added any adds to the fwdfilter, this would indicate that all of the
+	// adds were 1) settled locally by this link (exit hop), or 2) the htlc
+	// was failed locally.
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return packager.SetFwdFilter(tx, fwdPkg.Height, fwdPkg.FwdFilter)
+	}); err != nil {
+		t.Fatalf("unable to set fwdfiter: %v", err)
+	}
+
+	for i := range adds {
+		// We should still have one package on disk. Since the forwarding
+		// decision has been written, it will minimally be in FwdStateProcessed.
+		// However not allf of the HTLCs have been acked, so should not
+		// have advanced further.
+		fwdPkgs = loadFwdPkgs(t, db, packager)
+		if len(fwdPkgs) != 1 {
+			t.Fatalf("expected 1 fwdpkg, instead found %d", len(fwdPkgs))
+		}
+		assertFwdPkgState(t, fwdPkgs[0], channeldb.FwdStateProcessed)
+		assertAckFilterIsFull(t, fwdPkgs[0], false)
+
+		addRef := channeldb.AddRef{
+			Height: fwdPkg.Height,
+			Index:  uint16(i),
+		}
+
+		if err := db.Update(func(tx *bolt.Tx) error {
+			return packager.AckAddHtlcs(tx, addRef)
+		}); err != nil {
+			t.Fatalf("unable to ack add htlc: %v", err)
+		}
+	}
+
+	// We should still have one package on disk. Now that all adds have been
+	// acked, the ack filter should return true and the package should be
+	// FwdStateCompleted since there are no other settle/fail packets.
+	fwdPkgs = loadFwdPkgs(t, db, packager)
+	if len(fwdPkgs) != 1 {
+		t.Fatalf("expected 1 fwdpkg, instead found %d", len(fwdPkgs))
+	}
+	assertFwdPkgState(t, fwdPkgs[0], channeldb.FwdStateCompleted)
+	assertAckFilterIsFull(t, fwdPkgs[0], true)
+
+	// Lastly, remove the completed forwarding package from disk.
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return packager.RemovePkg(tx, fwdPkg.Height)
+	}); err != nil {
+		t.Fatalf("unable to remove fwdpkg: %v", err)
+	}
+
+	// Check that the fwd package was actually removed.
+	fwdPkgs = loadFwdPkgs(t, db, packager)
+	if len(fwdPkgs) != 0 {
+		t.Fatalf("no forwarding packages should exist, found %d", len(fwdPkgs))
+	}
+}
+
+// TestPackagerOnlySettleFails asserts that the fwdpkg transitions to
+// FwdStateFullyAcked after writing the forwarding decision when there are no
+// adds in the fwdpkg. We expect this because an empty FwdFilter will always
+// return true, but we are still waiting for the remaining fails and settles to
+// be deleted.
+func TestPackagerOnlySettleFails(t *testing.T) {
+	t.Parallel()
+
+	db := makeFwdPkgDB(t, "")
+
+	shortChanID := lnwire.NewShortChanIDFromInt(1)
+	packager := channeldb.NewPackager(shortChanID)
+
+	// To begin, there should be no forwarding packages on disk.
+	fwdPkgs := loadFwdPkgs(t, db, packager)
+	if len(fwdPkgs) != 0 {
+		t.Fatalf("no forwarding packages should exist, found %d", len(fwdPkgs))
+	}
+
+	// Next, create and write a new forwarding package that only has add
+	// htlcs.
+	fwdPkg := channeldb.NewFwdPkg(shortChanID, 0, nil, settleFails)
+
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return packager.AddFwdPkg(tx, fwdPkg)
+	}); err != nil {
+		t.Fatalf("unable to add fwd pkg: %v", err)
+	}
+
+	// There should now be one fwdpkg on disk. Since no forwarding decision
+	// has been written, we expect it to be FwdStateLockedIn. The package
+	// has unacked add HTLCs, so the ack filter should not be full.
+	fwdPkgs = loadFwdPkgs(t, db, packager)
+	if len(fwdPkgs) != 1 {
+		t.Fatalf("expected 1 fwdpkg, instead found %d", len(fwdPkgs))
+	}
+	assertFwdPkgState(t, fwdPkgs[0], channeldb.FwdStateLockedIn)
+	assertAckFilterIsFull(t, fwdPkgs[0], true)
+
+	// Now, write the forwarding decision. Since we have not explicitly
+	// added any adds to the fwdfilter, this would indicate that all of the
+	// adds were 1) settled locally by this link (exit hop), or 2) the htlc
+	// was failed locally.
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return packager.SetFwdFilter(tx, fwdPkg.Height, fwdPkg.FwdFilter)
+	}); err != nil {
+		t.Fatalf("unable to set fwdfiter: %v", err)
+	}
+
+	for i := range settleFails {
+		// We should still have one package on disk. Since the
+		// forwarding decision has been written, it will minimally be in
+		// FwdStateProcessed.  However not allf of the HTLCs have been
+		// acked, so should not have advanced further.
+		fwdPkgs = loadFwdPkgs(t, db, packager)
+		if len(fwdPkgs) != 1 {
+			t.Fatalf("expected 1 fwdpkg, instead found %d", len(fwdPkgs))
+		}
+		assertFwdPkgState(t, fwdPkgs[0], channeldb.FwdStateFullyAcked)
+		assertAckFilterIsFull(t, fwdPkgs[0], true)
+
+		failSettleRef := channeldb.SettleFailRef{
+			Source: shortChanID,
+			Height: fwdPkg.Height,
+			Index:  uint16(i),
+		}
+
+		if err := db.Update(func(tx *bolt.Tx) error {
+			return packager.RemoveHtlcs(tx, failSettleRef)
+		}); err != nil {
+			t.Fatalf("unable to ack add htlc: %v", err)
+		}
+	}
+
+	// We should still have one package on disk. Now that all settles and
+	// fails have been removed, package should be FwdStateCompleted since
+	// there are no other add packets.
+	fwdPkgs = loadFwdPkgs(t, db, packager)
+	if len(fwdPkgs) != 1 {
+		t.Fatalf("expected 1 fwdpkg, instead found %d", len(fwdPkgs))
+	}
+	assertFwdPkgState(t, fwdPkgs[0], channeldb.FwdStateCompleted)
+	assertAckFilterIsFull(t, fwdPkgs[0], true)
+
+	// Lastly, remove the completed forwarding package from disk.
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return packager.RemovePkg(tx, fwdPkg.Height)
+	}); err != nil {
+		t.Fatalf("unable to remove fwdpkg: %v", err)
+	}
+
+	// Check that the fwd package was actually removed.
+	fwdPkgs = loadFwdPkgs(t, db, packager)
+	if len(fwdPkgs) != 0 {
+		t.Fatalf("no forwarding packages should exist, found %d", len(fwdPkgs))
+	}
+}
+
+// TestPackagerAddsThenSettleFails writes a fwdpkg containing both adds and
+// settle/fails, then checks the behavior when the adds are settle before any of
+// the settle fails. Here we expect pkg to reach FwdStateFullyAcked while the
+// remainder of the fail/settles are being deleted.
+func TestPackagerAddsThenSettleFails(t *testing.T) {
+	t.Parallel()
+
+	db := makeFwdPkgDB(t, "")
+
+	shortChanID := lnwire.NewShortChanIDFromInt(1)
+	packager := channeldb.NewPackager(shortChanID)
+
+	// To begin, there should be no forwarding packages on disk.
+	fwdPkgs := loadFwdPkgs(t, db, packager)
+	if len(fwdPkgs) != 0 {
+		t.Fatalf("no forwarding packages should exist, found %d", len(fwdPkgs))
+	}
+
+	// Next, create and write a new forwarding package that only has add
+	// htlcs.
+	fwdPkg := channeldb.NewFwdPkg(shortChanID, 0, adds, settleFails)
+
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return packager.AddFwdPkg(tx, fwdPkg)
+	}); err != nil {
+		t.Fatalf("unable to add fwd pkg: %v", err)
+	}
+
+	// There should now be one fwdpkg on disk. Since no forwarding decision
+	// has been written, we expect it to be FwdStateLockedIn. The package
+	// has unacked add HTLCs, so the ack filter should not be full.
+	fwdPkgs = loadFwdPkgs(t, db, packager)
+	if len(fwdPkgs) != 1 {
+		t.Fatalf("expected 1 fwdpkg, instead found %d", len(fwdPkgs))
+	}
+	assertFwdPkgState(t, fwdPkgs[0], channeldb.FwdStateLockedIn)
+	assertAckFilterIsFull(t, fwdPkgs[0], false)
+
+	// Now, write the forwarding decision. Since we have not explicitly
+	// added any adds to the fwdfilter, this would indicate that all of the
+	// adds were 1) settled locally by this link (exit hop), or 2) the htlc
+	// was failed locally.
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return packager.SetFwdFilter(tx, fwdPkg.Height, fwdPkg.FwdFilter)
+	}); err != nil {
+		t.Fatalf("unable to set fwdfiter: %v", err)
+	}
+
+	for i := range adds {
+		// We should still have one package on disk. Since the forwarding
+		// decision has been written, it will minimally be in FwdStateProcessed.
+		// However not allf of the HTLCs have been acked, so should not
+		// have advanced further.
+		fwdPkgs = loadFwdPkgs(t, db, packager)
+		if len(fwdPkgs) != 1 {
+			t.Fatalf("expected 1 fwdpkg, instead found %d", len(fwdPkgs))
+		}
+		assertFwdPkgState(t, fwdPkgs[0], channeldb.FwdStateProcessed)
+		assertAckFilterIsFull(t, fwdPkgs[0], false)
+
+		addRef := channeldb.AddRef{
+			Height: fwdPkg.Height,
+			Index:  uint16(i),
+		}
+
+		if err := db.Update(func(tx *bolt.Tx) error {
+			return packager.AckAddHtlcs(tx, addRef)
+		}); err != nil {
+			t.Fatalf("unable to ack add htlc: %v", err)
+		}
+	}
+
+	for i := range settleFails {
+		// We should still have one package on disk. Since the
+		// forwarding decision has been written, it will minimally be in
+		// FwdStateProcessed.  However not allf of the HTLCs have been
+		// acked, so should not have advanced further.
+		fwdPkgs = loadFwdPkgs(t, db, packager)
+		if len(fwdPkgs) != 1 {
+			t.Fatalf("expected 1 fwdpkg, instead found %d", len(fwdPkgs))
+		}
+		assertFwdPkgState(t, fwdPkgs[0], channeldb.FwdStateFullyAcked)
+		assertAckFilterIsFull(t, fwdPkgs[0], true)
+
+		failSettleRef := channeldb.SettleFailRef{
+			Source: shortChanID,
+			Height: fwdPkg.Height,
+			Index:  uint16(i),
+		}
+
+		if err := db.Update(func(tx *bolt.Tx) error {
+			return packager.RemoveHtlcs(tx, failSettleRef)
+		}); err != nil {
+			t.Fatalf("unable to remove settle/fail htlc: %v", err)
+		}
+	}
+
+	// We should still have one package on disk. Now that all settles and
+	// fails have been removed, package should be FwdStateCompleted since
+	// there are no other add packets.
+	fwdPkgs = loadFwdPkgs(t, db, packager)
+	if len(fwdPkgs) != 1 {
+		t.Fatalf("expected 1 fwdpkg, instead found %d", len(fwdPkgs))
+	}
+	assertFwdPkgState(t, fwdPkgs[0], channeldb.FwdStateCompleted)
+	assertAckFilterIsFull(t, fwdPkgs[0], true)
+
+	// Lastly, remove the completed forwarding package from disk.
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return packager.RemovePkg(tx, fwdPkg.Height)
+	}); err != nil {
+		t.Fatalf("unable to remove fwdpkg: %v", err)
+	}
+
+	// Check that the fwd package was actually removed.
+	fwdPkgs = loadFwdPkgs(t, db, packager)
+	if len(fwdPkgs) != 0 {
+		t.Fatalf("no forwarding packages should exist, found %d", len(fwdPkgs))
+	}
+}
+
+// TestPackagerSettleFailsThenAdds writes a fwdpkg with both adds and
+// settle/fails, then checks the behavior when the settle/fails are removed
+// before any of the adds have been acked. This should cause the fwdpkg to
+// remain in FwdStateProcessed until the final ack is recorded, at which point
+// it should be promoted directly to FwdStateCompleted.since all adds have been
+// removed.
+func TestPackagerSettleFailsThenAdds(t *testing.T) {
+	t.Parallel()
+
+	db := makeFwdPkgDB(t, "")
+
+	shortChanID := lnwire.NewShortChanIDFromInt(1)
+	packager := channeldb.NewPackager(shortChanID)
+
+	// To begin, there should be no forwarding packages on disk.
+	fwdPkgs := loadFwdPkgs(t, db, packager)
+	if len(fwdPkgs) != 0 {
+		t.Fatalf("no forwarding packages should exist, found %d", len(fwdPkgs))
+	}
+
+	// Next, create and write a new forwarding package that only has add
+	// htlcs.
+	fwdPkg := channeldb.NewFwdPkg(shortChanID, 0, adds, settleFails)
+
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return packager.AddFwdPkg(tx, fwdPkg)
+	}); err != nil {
+		t.Fatalf("unable to add fwd pkg: %v", err)
+	}
+
+	// There should now be one fwdpkg on disk. Since no forwarding decision
+	// has been written, we expect it to be FwdStateLockedIn. The package
+	// has unacked add HTLCs, so the ack filter should not be full.
+	fwdPkgs = loadFwdPkgs(t, db, packager)
+	if len(fwdPkgs) != 1 {
+		t.Fatalf("expected 1 fwdpkg, instead found %d", len(fwdPkgs))
+	}
+	assertFwdPkgState(t, fwdPkgs[0], channeldb.FwdStateLockedIn)
+	assertAckFilterIsFull(t, fwdPkgs[0], false)
+
+	// Now, write the forwarding decision. Since we have not explicitly
+	// added any adds to the fwdfilter, this would indicate that all of the
+	// adds were 1) settled locally by this link (exit hop), or 2) the htlc
+	// was failed locally.
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return packager.SetFwdFilter(tx, fwdPkg.Height, fwdPkg.FwdFilter)
+	}); err != nil {
+		t.Fatalf("unable to set fwdfiter: %v", err)
+	}
+
+	for i := range settleFails {
+		// We should still have one package on disk. Since the
+		// forwarding decision has been written, it will minimally be in
+		// FwdStateProcessed.  However not allf of the HTLCs have been
+		// acked, so should not have advanced further.
+		fwdPkgs = loadFwdPkgs(t, db, packager)
+		if len(fwdPkgs) != 1 {
+			t.Fatalf("expected 1 fwdpkg, instead found %d", len(fwdPkgs))
+		}
+		assertFwdPkgState(t, fwdPkgs[0], channeldb.FwdStateProcessed)
+		assertAckFilterIsFull(t, fwdPkgs[0], false)
+
+		failSettleRef := channeldb.SettleFailRef{
+			Source: shortChanID,
+			Height: fwdPkg.Height,
+			Index:  uint16(i),
+		}
+
+		if err := db.Update(func(tx *bolt.Tx) error {
+			return packager.RemoveHtlcs(tx, failSettleRef)
+		}); err != nil {
+			t.Fatalf("unable to remove settle/fail htlc: %v", err)
+		}
+	}
+
+	for i := range adds {
+		// We should still have one package on disk. Since the forwarding
+		// decision has been written, it will minimally be in FwdStateProcessed.
+		// However not allf of the HTLCs have been acked, so should not
+		// have advanced further.
+		fwdPkgs = loadFwdPkgs(t, db, packager)
+		if len(fwdPkgs) != 1 {
+			t.Fatalf("expected 1 fwdpkg, instead found %d", len(fwdPkgs))
+		}
+		assertFwdPkgState(t, fwdPkgs[0], channeldb.FwdStateProcessed)
+		assertAckFilterIsFull(t, fwdPkgs[0], false)
+
+		addRef := channeldb.AddRef{
+			Height: fwdPkg.Height,
+			Index:  uint16(i),
+		}
+
+		if err := db.Update(func(tx *bolt.Tx) error {
+			return packager.AckAddHtlcs(tx, addRef)
+		}); err != nil {
+			t.Fatalf("unable to ack add htlc: %v", err)
+		}
+	}
+
+	// We should still have one package on disk. Now that all settles and
+	// fails have been removed, package should be FwdStateCompleted since
+	// there are no other add packets.
+	fwdPkgs = loadFwdPkgs(t, db, packager)
+	if len(fwdPkgs) != 1 {
+		t.Fatalf("expected 1 fwdpkg, instead found %d", len(fwdPkgs))
+	}
+	assertFwdPkgState(t, fwdPkgs[0], channeldb.FwdStateCompleted)
+	assertAckFilterIsFull(t, fwdPkgs[0], true)
+
+	// Lastly, remove the completed forwarding package from disk.
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return packager.RemovePkg(tx, fwdPkg.Height)
+	}); err != nil {
+		t.Fatalf("unable to remove fwdpkg: %v", err)
+	}
+
+	// Check that the fwd package was actually removed.
+	fwdPkgs = loadFwdPkgs(t, db, packager)
+	if len(fwdPkgs) != 0 {
+		t.Fatalf("no forwarding packages should exist, found %d", len(fwdPkgs))
+	}
+}
+
+// assertFwdPkgState checks the current state of a fwdpkg meets our
+// expectations.
+func assertFwdPkgState(t *testing.T, fwdPkg *channeldb.FwdPkg,
+	state channeldb.FwdState) {
+	_, _, line, _ := runtime.Caller(1)
+	if fwdPkg.State != state {
+		t.Fatalf("line %d: expected fwdpkg in state %v, found %v",
+			line, state, fwdPkg.State)
+	}
+}
+
+// assertFwdPkgNumAddsSettleFails checks that the number of adds and
+// settle/fail log updates are correct.
+func assertFwdPkgNumAddsSettleFails(t *testing.T, fwdPkg *channeldb.FwdPkg,
+	expectedNumAdds, expectedNumSettleFails int) {
+	_, _, line, _ := runtime.Caller(1)
+	if len(fwdPkg.Adds) != expectedNumAdds {
+		t.Fatalf("line %d: expected fwdpkg to have %d adds, found %d",
+			line, expectedNumAdds, len(fwdPkg.Adds))
+	}
+
+	if len(fwdPkg.SettleFails) != expectedNumSettleFails {
+		t.Fatalf("line %d: expected fwdpkg to have %d settle/fails, found %d",
+			line, expectedNumSettleFails, len(fwdPkg.SettleFails))
+	}
+}
+
+// assertAckFilterIsFull checks whether or not a fwdpkg's ack filter matches our
+// expected full-ness.
+func assertAckFilterIsFull(t *testing.T, fwdPkg *channeldb.FwdPkg, expected bool) {
+	_, _, line, _ := runtime.Caller(1)
+	if fwdPkg.AckFilter.IsFull() != expected {
+		t.Fatalf("line %d: expected fwdpkg ack filter IsFull to be %v, "+
+			"found %v", line, expected, fwdPkg.AckFilter.IsFull())
+	}
+}
+
+// loadFwdPkgs is a helper method that reads all forwarding packages for a
+// particular packager.
+func loadFwdPkgs(t *testing.T, db *bolt.DB,
+	packager channeldb.FwdPackager) []*channeldb.FwdPkg {
+
+	var fwdPkgs []*channeldb.FwdPkg
+	if err := db.View(func(tx *bolt.Tx) error {
+		var err error
+		fwdPkgs, err = packager.LoadFwdPkgs(tx)
+		return err
+	}); err != nil {
+		t.Fatalf("unable to load fwd pkgs: %v", err)
+	}
+
+	return fwdPkgs
+}
+
+// makeFwdPkgDB initializes a test database for forwarding packages. If the
+// provided path is an empty, it will create a temp dir/file to use.
+func makeFwdPkgDB(t *testing.T, path string) *bolt.DB {
+	if path == "" {
+		var err error
+		path, err = ioutil.TempDir("", "fwdpkgdb")
+		if err != nil {
+			t.Fatalf("unable to create temp path: %v", err)
+		}
+
+		path = filepath.Join(path, "fwdpkg.db")
+	}
+
+	db, err := bolt.Open(path, 0600, nil)
+	if err != nil {
+		t.Fatalf("unable to open boltdb: %v", err)
+	}
+
+	return db
 }
