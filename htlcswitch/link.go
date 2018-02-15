@@ -2147,7 +2147,7 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 // err chan for the individual responses. This method is intended to be spawned
 // as a goroutine so the responses can be handled in the background.
 func (l *channelLink) forwardBatch(packets ...*htlcPacket) {
-	errChan := l.cfg.Switch.forwardBatch(packets...)
+	errChan := l.cfg.Switch.forwardBatch(l, packets...)
 	l.handleBatchFwdErrs(errChan)
 }
 
