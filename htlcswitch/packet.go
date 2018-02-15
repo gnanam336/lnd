@@ -68,6 +68,10 @@ type htlcPacket struct {
 	// encrypt all errors related to this packet as if we were the first
 	// hop.
 	isResolution bool
+
+	// circuit holds a reference to an Add's circuit which is persisted in
+	// the switch during successful forwarding.
+	circuit *PaymentCircuit
 }
 
 // inKey returns the circuit key used to identify the incoming htlc.
