@@ -925,10 +925,12 @@ func (s *Switch) handlePacketForward(packet *htlcPacket) error {
 		if err != nil {
 			sourceMailbox := s.getOrCreateMailBox(packet.incomingChanID)
 			sourceMailbox.AddPacket(packet)
-			err := errors.Errorf("Unable to get source channel "+
-				"link to forward HTLC settle/fail: %v", err)
-			log.Error(err)
-			return err
+			err = errors.Errorf("Unable to get source channel "+
+				"link to forward HTLC settle/fail: %v. "+
+				"Adding packet to mailbox for chan=%v",
+				err, packet.incomingChanID)
+			log.Warn(err)
+			return nil
 		}
 
 		/*
@@ -966,10 +968,14 @@ func (s *Switch) handlePacketForward(packet *htlcPacket) error {
 		// the circuit.
 		source, err := s.getLinkByShortID(packet.incomingChanID)
 		if err != nil {
+			sourceMailbox := s.getOrCreateMailBox(packet.incomingChanID)
+			sourceMailbox.AddPacket(packet)
 			err = errors.Errorf("Unable to get source channel "+
-				"link to forward HTLC settle/fail: %v", err)
-			log.Error(err)
-			return err
+				"link to forward HTLC settle/fail: %v. "+
+				"Adding packet to mailbox for chan=%v",
+				err, packet.incomingChanID)
+			log.Warn(err)
+			return nil
 		}
 
 		/*
