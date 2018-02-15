@@ -27,8 +27,13 @@ var (
 	ErrChannelLinkNotFound = errors.New("channel link not found")
 
 	// ErrDuplicateAdd signals that the ADD htlc was already forwarded
-	// through the switch.
+	// through the switch and is locked into another commitment txn.
 	ErrDuplicateAdd = errors.New("duplicate add HTLC detected")
+
+	// ErrIncompleteForward is used when an htlc was already forwarded
+	// through the switch, but did not get locked into another commitment
+	// txn.
+	ErrIncompleteForward = errors.Errorf("incomplete forward detected")
 
 	// zeroPreimage is the empty preimage which is returned when we have
 	// some errors.
@@ -281,7 +286,7 @@ func (s *Switch) SendHTLC(nextNode [33]byte, htlc *lnwire.UpdateAddHTLC,
 		htlc:           htlc,
 	}
 
-	if err := s.forward(packet); err != nil {
+	if err := s.forward(nil, packet); err != nil {
 		s.removePendingPayment(paymentID)
 		return zeroPreimage, err
 	}
@@ -404,19 +409,31 @@ func (s *Switch) updateLinkPolicies(c *updatePoliciesCmd) error {
 // forward is used in order to find next channel link and apply htlc
 // update. Also this function is used by channel links itself in order to
 // forward the update after it has been included in the channel.
-func (s *Switch) forward(packet *htlcPacket) error {
+func (s *Switch) forward(source ChannelLink, packet *htlcPacket) error {
 	switch htlc := packet.htlc.(type) {
 	case *lnwire.UpdateAddHTLC:
 		circuit := newPaymentCircuit(&htlc.PaymentHash, packet)
-		circuitToAdd, err := s.circuits.CommitCircuits(circuit)
+		_, drops, fails, err := s.circuits.CommitCircuits(circuit)
 		if err != nil {
 			log.Errorf("unable to commit circuit in switch: %v", err)
 			return err
 		}
 
 		// Drop duplicate packet if it has already been seen.
-		if len(circuitToAdd) == 0 {
+		switch {
+		case len(drops) == 1:
 			return ErrDuplicateAdd
+
+		case len(fails) == 1:
+			if source == nil {
+				return err
+			}
+
+			failure := lnwire.NewTemporaryChannelFailure(nil)
+			addErr := ErrIncompleteForward
+
+			return s.failAddPacket(source, packet, failure, addErr)
+
 		}
 	}
 
@@ -430,7 +447,9 @@ func (s *Switch) forward(packet *htlcPacket) error {
 // NOTE: This method guarantees that the returned err chan will eventually be
 // closed. The receiver should read on the channel until receiving such a
 // signal.
-func (s *Switch) forwardBatch(packets ...*htlcPacket) chan error {
+func (s *Switch) forwardBatch(source ChannelLink,
+	packets ...*htlcPacket) chan error {
+
 	var (
 		// fwdChan is a buffered channel used to receive err msgs from
 		// the htlcPlex when forwarding this batch.
@@ -462,92 +481,106 @@ func (s *Switch) forwardBatch(packets ...*htlcPacket) chan error {
 
 	// Spawn a goroutine the proxy the errs back to the returned err chan.
 	// This is done to ensure the err chan returned to the caller closed
-	// properly, alerting the receiver of completion or teardown.
-	go func() {
-		defer func() {
-			close(errChan)
-		}()
-
-		// Wait here until the outer function has finished persisting
-		// and routing the packets.
-		wg.Wait()
-
-		for i := 0; i < numSent; i++ {
-			select {
-			case err := <-fwdChan:
-				errChan <- err
-			case <-s.quit:
-				log.Errorf("unable to forward htlc packet " +
-					"htlc switch was stopped")
-				return
-			}
-		}
-	}()
+	// properly, alerting the receiver of completion or shutdown.
+	s.wg.Add(1)
+	go s.proxyFwdErrs(&numSent, &wg, fwdChan, errChan)
 
 	// Make a first pass over the packets, forwarding any settles or fails.
 	// As adds are found, we create a circuit and append it to our set of
 	// circuits to be written to disk.
 	var circuits []*PaymentCircuit
-	var addPackets []*htlcPacket
+	var addBatch []*htlcPacket
 	for _, packet := range packets {
 		switch htlc := packet.htlc.(type) {
 		case *lnwire.UpdateAddHTLC:
 			circuit := newPaymentCircuit(&htlc.PaymentHash, packet)
+			packet.circuit = circuit
 			circuits = append(circuits, circuit)
-			addPackets = append(addPackets, packet)
+			addBatch = append(addBatch, packet)
 		default:
 			s.routeAsync(packet, fwdChan)
 			numSent++
 		}
 	}
 
+	// If this batch cont
 	if len(circuits) == 0 {
 		return errChan
 	}
 
 	// Write any circuits that we found to disk.
-	circuitsToAdd, err := s.circuits.CommitCircuits(circuits...)
+	adds, drops, fails, err := s.circuits.CommitCircuits(circuits...)
 	if err != nil {
 		log.Errorf("unable to commit circuits in switch: %v", err)
-		return errChan
 	}
 
-	// If no new circuits were added as a result of CommitCircuits, exit
-	// early since we don't need to perform the following seek.
-	if len(circuitsToAdd) == 0 {
-		return errChan
-	}
+	// Split the htlc packets by comparing an in-order seek to the head of
+	// the added, dropped, or failed circuits.
+	// NOTE: This assumes each list is guaranteed to be a subsequence of the
+	// circuits, and that the union of the sets results in the original set
+	// of circuits.
+	var addedPackets, failedPackets []*htlcPacket
+	for _, packet := range addBatch {
+		switch {
+		case len(adds) > 0 && packet.circuit == adds[0]:
+			addedPackets = append(addedPackets, packet)
+			adds = adds[1:]
 
-	// Using the list of circuits that were actually added, do an in-order
-	// seek of the add packets provided, forwarding only those that match in
-	// incoming chan and htlc ID.
-	var cursor int
-	for _, circuit := range circuitsToAdd {
-	seek:
-		for cursor < len(addPackets) {
-			packet := addPackets[cursor]
-			cursor++
+		case len(drops) > 0 && packet.circuit == drops[0]:
+			drops = drops[1:]
 
-			switch packet.htlc.(type) {
-			case *lnwire.UpdateAddHTLC:
-				// Skip any packets with incoming circuit keys
-				// that do not match the next circuit's incoming
-				// key.
-				if packet.inKey() != circuit.InKey() {
-					continue
-				}
-
-				s.routeAsync(packet, fwdChan)
-				numSent++
-
-				// This circuit's packet was found, move on to
-				// the next circuit.
-				break seek
-			}
+		case len(fails) > 0 && packet.circuit == fails[0]:
+			failedPackets = append(failedPackets, packet)
+			fails = fails[1:]
 		}
 	}
 
+	// Now, forward any packets for circuits that were successfully added to
+	// the switch's circuit map.
+	for _, packet := range addedPackets {
+		s.routeAsync(packet, fwdChan)
+		numSent++
+	}
+
+	// Lastly, for any packets that failed, this implies that they were
+	// left in a half added state, which can happen when recovering from
+	// failures.
+	for _, packet := range failedPackets {
+		failure := lnwire.NewTemporaryChannelFailure(nil)
+		addErr := errors.Errorf("failing packet after detecting " +
+			"incomplete forward")
+
+		// We don't handle the error here since this method always
+		// returns an error.
+		s.failAddPacket(source, packet, failure, addErr)
+	}
+
 	return errChan
+}
+
+func (s *Switch) proxyFwdErrs(num *int, wg *sync.WaitGroup,
+	fwdChan, errChan chan error) {
+	defer s.wg.Done()
+	defer func() {
+		close(errChan)
+	}()
+
+	// Wait here until the outer function has finished persisting
+	// and routing the packets. This guarantees we don't read from num until
+	// the value is accurate.
+	wg.Wait()
+
+	numSent := *num
+	for i := 0; i < numSent; i++ {
+		select {
+		case err := <-fwdChan:
+			errChan <- err
+		case <-s.quit:
+			log.Errorf("unable to forward htlc packet " +
+				"htlc switch was stopped")
+			return
+		}
+	}
 }
 
 // route sends a single htlcPacket through the switch and synchronously awaits a
@@ -1665,8 +1698,10 @@ func (s *Switch) numPendingPayments() int {
 }
 
 // addCircuit persistently adds a circuit to the switch's circuit map.
-func (s *Switch) commitCircuits(circuit ...*PaymentCircuit) ([]*PaymentCircuit, error) {
-	return s.circuits.CommitCircuits(circuit...)
+func (s *Switch) commitCircuits(circuits ...*PaymentCircuit,
+) ([]*PaymentCircuit, []*PaymentCircuit, []*PaymentCircuit, error) {
+
+	return s.circuits.CommitCircuits(circuits...)
 }
 
 // addHalfCircuit persistently adds a half-circuit to the switch's circuit map.
