@@ -8,10 +8,6 @@ import (
 // htlcPacket is a wrapper around htlc lnwire update, which adds additional
 // information which is needed by this package.
 type htlcPacket struct {
-	// fwdIndex represents the persistent forwarding index assigned by the
-	// switch.
-	fwdIndex uint64
-
 	// destNode is the first-hop destination of a local created HTLC add
 	// message.
 	destNode [33]byte
@@ -32,10 +28,14 @@ type htlcPacket struct {
 	// outgoing channel.
 	outgoingHTLCID uint64
 
-	// sourceRef...
+	// sourceRef is used by forwarded htlcPackets to locate incoming Add
+	// entry in a fwdpkg owned by the incoming link. This value can be nil
+	// if there is no such entry, e.g. switch initiated payments.
 	sourceRef *channeldb.AddRef
 
-	// destRef...
+	// destRef is used to locate a settle/fail entry in the outgoing link's
+	// fwdpkg. If sourceRef is non-nil, this reference should be to a
+	// settle/fail in response to the sourceRef.
 	destRef *channeldb.SettleFailRef
 
 	// incomingAmount is the value in milli-satoshis that arrived on an
