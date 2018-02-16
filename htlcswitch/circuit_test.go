@@ -98,7 +98,7 @@ func TestHalfCircuitSerialization(t *testing.T) {
 		}
 
 		// Reconstructed half circuit should match the original.
-		if !reflect.DeepEqual(circuit, &circuit2) {
+		if !equalIgnoreLFD(circuit, &circuit2) {
 			t.Fatalf("unexpected half circuit test=%d, want %v, got %v",
 				i, circuit, circuit2)
 		}
@@ -419,7 +419,7 @@ func assertHasKeystone(t *testing.T, cm htlcswitch.CircuitMap,
 	outKey htlcswitch.CircuitKey, c *htlcswitch.PaymentCircuit) {
 
 	circuit := cm.LookupByKeystone(outKey)
-	if !reflect.DeepEqual(circuit, c) {
+	if !equalIgnoreLFD(circuit, c) {
 		t.Fatalf("unexpected circuit, want: %v, got %v", c, circuit)
 	}
 }
@@ -443,7 +443,7 @@ func assertHasCircuitForHash(t *testing.T, cm htlcswitch.CircuitMap, hash [32]by
 
 	circuits := cm.LookupByPaymentHash(hash)
 	for _, c := range circuits {
-		if reflect.DeepEqual(c, circuit) {
+		if equalIgnoreLFD(c, circuit) {
 			return
 		}
 	}
@@ -470,9 +470,27 @@ func assertHasCircuit(t *testing.T, cm htlcswitch.CircuitMap,
 	c *htlcswitch.PaymentCircuit) {
 
 	c2 := cm.LookupCircuit(c.Incoming)
-	if !reflect.DeepEqual(c, c2) {
+	if !equalIgnoreLFD(c, c2) {
 		t.Fatalf("expected circuit: %v, got %v", c, c2)
 	}
+}
+
+// equalIgnoreLFD compares two payment circuits, but ignores the current value
+// of LoadedFromDisk. The value is temporarily set to false for the comparison
+// and then restored.
+func equalIgnoreLFD(c, c2 *htlcswitch.PaymentCircuit) bool {
+	ogLFD := c.LoadedFromDisk
+	ogLFD2 := c2.LoadedFromDisk
+
+	c.LoadedFromDisk = false
+	c2.LoadedFromDisk = false
+
+	isEqual := reflect.DeepEqual(c, c2)
+
+	c.LoadedFromDisk = ogLFD
+	c2.LoadedFromDisk = ogLFD2
+
+	return isEqual
 }
 
 // assertDoesNotHaveCircuit queries the circuit map using the circuit's
