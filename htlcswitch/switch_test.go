@@ -115,7 +115,7 @@ func TestSwitchForward(t *testing.T) {
 
 	select {
 	case pkt := <-aliceChannelLink.packets:
-		if err := aliceChannelLink.completeCircuit(pkt); err != nil {
+		if err := aliceChannelLink.deleteCircuit(pkt); err != nil {
 			t.Fatalf("unable to remove circuit: %v", err)
 		}
 	case <-time.After(time.Second):
