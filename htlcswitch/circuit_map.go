@@ -544,7 +544,7 @@ func (cm *circuitMap) Close(inKey CircuitKey) error {
 	}
 
 	cm.closed[inKey] = struct{}{}
-	cm.mtx.Lock()
+	cm.mtx.Unlock()
 
 	return nil
 }
@@ -571,7 +571,6 @@ func (cm *circuitMap) Delete(inKey CircuitKey) error {
 		delete(cm.opened, circuit.OutKey())
 		cm.removeCircuitFromHashIndex(circuit)
 	}
-
 	cm.mtx.Unlock()
 
 	err := cm.db.Batch(func(tx *bolt.Tx) error {
