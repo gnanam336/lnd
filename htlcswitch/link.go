@@ -210,6 +210,11 @@ type ChannelLinkConfig struct {
 	// coalesced into a single commit.
 	BatchTicker Ticker
 
+	// FwdPkgGCTicker is the ticker determining the frequency at which
+	// garbage collection of forwarding packages occurs. We use a time-based
+	// approach, as opposed to block epochs, as to not hinder syncing.
+	FwdPkgGCTicker Ticker
+
 	// BatchSize is the max size of a batch of updates done to the link
 	// before we do a state update.
 	BatchSize uint32
@@ -722,6 +727,9 @@ func (l *channelLink) htlcManager() {
 	batchTick := l.cfg.BatchTicker.Start()
 	defer l.cfg.BatchTicker.Stop()
 
+	fwdPkgGcTick := l.cfg.FwdPkgGCTicker.Start()
+	defer l.cfg.FwdPkgGCTicker.Stop()
+
 	// TODO(roasbeef): fail chan in case of protocol violation
 out:
 	for {
@@ -877,6 +885,25 @@ out:
 				}
 			}
 
+		case <-fwdPkgGcTick:
+			fwdPkgs, err := l.channel.LoadFwdPkgs()
+			if err != nil {
+				log.Warnf("unable to load fwdpkgs for gc: %v", err)
+				continue
+			}
+
+			for _, fwdPkg := range fwdPkgs {
+				if fwdPkg.State != channeldb.FwdStateCompleted {
+					continue
+				}
+
+				err = l.channel.RemoveFwdPkg(fwdPkg.Height)
+				if err != nil {
+					log.Warnf("unable to remove fwdpkg at "+
+						"height=%d: %v", err, fwdPkg.Height)
+				}
+			}
+
 		case <-l.quit:
 			break out
 		}
@@ -949,6 +976,7 @@ func (l *channelLink) handleDownStreamPkt(pkt *htlcPacket, isReProcess bool) {
 				failPkt := &htlcPacket{
 					incomingChanID: pkt.incomingChanID,
 					incomingHTLCID: pkt.incomingHTLCID,
+					circuit:        pkt.circuit,
 					sourceRef:      pkt.sourceRef,
 					amount:         htlc.Amount,
 					hasSource:      true,
@@ -999,14 +1027,11 @@ func (l *channelLink) handleDownStreamPkt(pkt *htlcPacket, isReProcess bool) {
 			return
 		}
 
-		circuit := l.cfg.Switch.lookupClosedCircuit(pkt.inKey())
-		if circuit != nil {
-			err = l.cfg.Switch.teardownCircuit(circuit, pkt)
-			if err != nil {
-				l.fail("unable to teardown circuit %s: %v",
-					pkt.inKey(), err)
-				return
-			}
+		err = l.cfg.Switch.teardownCircuit(pkt.circuit, pkt)
+		if err != nil {
+			l.fail("unable to teardown circuit %s: %v",
+				pkt.inKey(), err)
+			return
 		}
 
 		// With the HTLC settled, we'll need to populate the wire
@@ -1032,14 +1057,11 @@ func (l *channelLink) handleDownStreamPkt(pkt *htlcPacket, isReProcess bool) {
 			return
 		}
 
-		circuit := l.cfg.Switch.lookupClosedCircuit(pkt.inKey())
-		if circuit != nil {
-			err = l.cfg.Switch.teardownCircuit(circuit, pkt)
-			if err != nil {
-				l.fail("unable to teardown circuit %s: %v",
-					pkt.inKey(), err)
-				return
-			}
+		err = l.cfg.Switch.teardownCircuit(pkt.circuit, pkt)
+		if err != nil {
+			l.fail("unable to teardown circuit %s: %v",
+				pkt.inKey(), err)
+			return
 		}
 
 		// With the HTLC removed, we'll need to populate the wire
@@ -2137,7 +2159,6 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg,
 		if err != nil {
 			return
 		}
-		fwdPkg.State = channeldb.FwdStateProcessed
 	}
 
 	if needUpdate {
