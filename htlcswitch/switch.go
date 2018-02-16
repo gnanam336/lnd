@@ -325,13 +325,11 @@ func (s *Switch) SendHTLC(nextNode [33]byte, htlc *lnwire.UpdateAddHTLC,
 			"while waiting for payment result")
 	}
 
-	circuit := s.lookupCircuit(response.inKey())
-
 	// Remove circuit since we are about to complete an
 	// add/fail of this HTLC.
 	// TODO(conner): batch teardown by only modifying memory here,
 	// and batching at source link.
-	if terr := s.teardownCircuit(circuit, response); terr != nil {
+	if terr := s.teardownCircuit(response.circuit, response); terr != nil {
 		log.Warnf("unable to teardown circuit %s: %v", response.inKey(), terr)
 	}
 
@@ -438,8 +436,9 @@ func (s *Switch) forward(source ChannelLink, packet *htlcPacket) error {
 			addErr := ErrIncompleteForward
 
 			return s.failAddPacket(source, packet, failure, addErr)
-
 		}
+
+		packet.circuit = circuit
 	}
 
 	return s.route(packet)
@@ -717,24 +716,6 @@ func (s *Switch) handleLocalDispatch(pkt *htlcPacket) error {
 	// We've just received a settle update which means we can finalize the
 	// user payment and return successful response.
 	case *lnwire.UpdateFulfillHTLC:
-		circuit := s.lookupKeystone(pkt.outKey())
-		if circuit == nil {
-			// If no circuit is present, this is likely a duplicate
-			// message.
-			log.Errorf("unknown circuit for keystone=%v", pkt.outKey())
-			return ErrUnknownCircuit
-		}
-
-		/*
-			// Remove circuit since we are about to complete an
-			// settle/fail of this HTLC.
-			// TODO(conner): batch teardown by only modifying memory here,
-			// and batching at source link.
-			if err := s.teardownCircuit(circuit, pkt); err != nil {
-				return err
-			}
-		*/
-
 		// Notify the user that his payment was successfully proceed.
 		payment.err <- nil
 		payment.response <- pkt
@@ -744,75 +725,7 @@ func (s *Switch) handleLocalDispatch(pkt *htlcPacket) error {
 	// We've just received a fail update which means we can finalize the
 	// user payment and return fail response.
 	case *lnwire.UpdateFailHTLC:
-		var (
-			failure *ForwardingError
-			circuit *PaymentCircuit
-		)
-
-		switch {
-
-		// The payment never cleared the link, so we don't need to
-		// decrypt the error, simply decode it them report back to the
-		// user.
-		case pkt.localFailure:
-			var userErr string
-			r := bytes.NewReader(htlc.Reason)
-			failureMsg, err := lnwire.DecodeFailure(r, 0)
-			if err != nil {
-				userErr = fmt.Sprintf("unable to decode onion failure, "+
-					"htlc with hash(%x): %v", payment.paymentHash[:], err)
-				log.Error(userErr)
-				failureMsg = lnwire.NewTemporaryChannelFailure(nil)
-			}
-			failure = &ForwardingError{
-				ErrorSource:    s.cfg.SelfKey,
-				ExtraMsg:       userErr,
-				FailureMessage: failureMsg,
-			}
-
-			circuit = s.lookupCircuit(pkt.inKey())
-
-		// A payment had to be timed out on chain before it got past
-		// the first hop. In this case, we'll report a permanent
-		// channel failure as this means us, or the remote party had to
-		// go on chain.
-		case pkt.isResolution && htlc.Reason == nil:
-			userErr := fmt.Sprintf("payment was resolved " +
-				"on-chain, then cancelled back")
-			failure = &ForwardingError{
-				ErrorSource:    s.cfg.SelfKey,
-				ExtraMsg:       userErr,
-				FailureMessage: lnwire.FailPermanentChannelFailure{},
-			}
-
-			circuit = s.lookupCircuit(pkt.inKey())
-
-		// A regular multi-hop payment error that we'll need to
-		// decrypt.
-		default:
-			// We'll attempt to fully decrypt the onion encrypted
-			// error. If we're unable to then we'll bail early.
-			failure, err = payment.deobfuscator.DecryptError(htlc.Reason)
-			if err != nil {
-				userErr := fmt.Sprintf("unable to de-obfuscate onion failure, "+
-					"htlc with hash(%x): %v", payment.paymentHash[:], err)
-				log.Error(userErr)
-				failure = &ForwardingError{
-					ErrorSource:    s.cfg.SelfKey,
-					ExtraMsg:       userErr,
-					FailureMessage: lnwire.NewTemporaryChannelFailure(nil),
-				}
-			}
-
-			circuit = s.lookupKeystone(pkt.outKey())
-		}
-
-		// Circuit was not found, may have already been handled.
-		if circuit == nil {
-			return ErrUnknownCircuit
-		}
-
-		payment.err <- failure
+		payment.err <- s.parseFailedPayment(payment, pkt, htlc)
 		payment.response <- pkt
 		payment.preimage <- zeroPreimage
 		s.removePendingPayment(pkt.incomingHTLCID)
@@ -822,6 +735,67 @@ func (s *Switch) handleLocalDispatch(pkt *htlcPacket) error {
 	}
 
 	return nil
+}
+
+func (s *Switch) parseFailedPayment(payment *pendingPayment, pkt *htlcPacket,
+	htlc *lnwire.UpdateFailHTLC) *ForwardingError {
+
+	var failure *ForwardingError
+
+	switch {
+
+	// The payment never cleared the link, so we don't need to
+	// decrypt the error, simply decode it them report back to the
+	// user.
+	case pkt.localFailure:
+		var userErr string
+		r := bytes.NewReader(htlc.Reason)
+		failureMsg, err := lnwire.DecodeFailure(r, 0)
+		if err != nil {
+			userErr = fmt.Sprintf("unable to decode onion failure, "+
+				"htlc with hash(%x): %v", payment.paymentHash[:], err)
+			log.Error(userErr)
+			failureMsg = lnwire.NewTemporaryChannelFailure(nil)
+		}
+		failure = &ForwardingError{
+			ErrorSource:    s.cfg.SelfKey,
+			ExtraMsg:       userErr,
+			FailureMessage: failureMsg,
+		}
+
+	// A payment had to be timed out on chain before it got past
+	// the first hop. In this case, we'll report a permanent
+	// channel failure as this means us, or the remote party had to
+	// go on chain.
+	case pkt.isResolution && htlc.Reason == nil:
+		userErr := fmt.Sprintf("payment was resolved " +
+			"on-chain, then cancelled back")
+		failure = &ForwardingError{
+			ErrorSource:    s.cfg.SelfKey,
+			ExtraMsg:       userErr,
+			FailureMessage: lnwire.FailPermanentChannelFailure{},
+		}
+
+	// A regular multi-hop payment error that we'll need to
+	// decrypt.
+	default:
+		var err error
+		// We'll attempt to fully decrypt the onion encrypted
+		// error. If we're unable to then we'll bail early.
+		failure, err = payment.deobfuscator.DecryptError(htlc.Reason)
+		if err != nil {
+			userErr := fmt.Sprintf("unable to de-obfuscate onion failure, "+
+				"htlc with hash(%x): %v", payment.paymentHash[:], err)
+			log.Error(userErr)
+			failure = &ForwardingError{
+				ErrorSource:    s.cfg.SelfKey,
+				ExtraMsg:       userErr,
+				FailureMessage: lnwire.NewTemporaryChannelFailure(nil),
+			}
+		}
+	}
+
+	return failure
 }
 
 // handlePacketForward is used in cases when we need forward the htlc update
@@ -897,64 +871,43 @@ func (s *Switch) handlePacketForward(packet *htlcPacket) error {
 		packet.outgoingChanID = destination.ShortChanID()
 		return destination.HandleSwitchPacket(packet)
 
-	// We've just received a settle packet which means we can finalize the
-	// payment circuit by forwarding the settle msg to the channel from
-	// which htlc add packet was initially received.
-	case *lnwire.UpdateFulfillHTLC:
-		var (
-			//circuit *PaymentCircuit
-			err error
-		)
+	case *lnwire.UpdateFailHTLC, *lnwire.UpdateFulfillHTLC:
 
 		// If the source of this packet has not been set, use the
 		// circuit map to lookup the origin.
-		if !packet.hasSource {
-			_, err = s.closeCircuit(htlc, packet)
-			if err != nil {
-				return err
-			}
-		}
-
-		// A blank IncomingChanID in a circuit indicates that it is a pending
-		// user-initiated payment.
-		if packet.incomingChanID == sourceHop {
-			return s.handleLocalDispatch(packet)
-		}
-
-		source, err := s.getLinkByShortID(packet.incomingChanID)
+		circuit, err := s.closeCircuit(packet)
 		if err != nil {
-			sourceMailbox := s.getOrCreateMailBox(packet.incomingChanID)
-			sourceMailbox.AddPacket(packet)
-			err = errors.Errorf("Unable to get source channel "+
-				"link to forward HTLC settle/fail: %v. "+
-				"Adding packet to mailbox for chan=%v",
-				err, packet.incomingChanID)
-			log.Warn(err)
-			return nil
+			return err
 		}
 
-		/*
-			// TODO(conner): batch teardown by only modifying memory here,
-			// and batching at source link.
-			if err := s.teardownCircuit(circuit, packet); err != nil {
-				return err
-			}
-		*/
+		fail, isFail := htlc.(*lnwire.UpdateFailHTLC)
+		if isFail && !packet.hasSource {
+			switch {
+			case circuit.ErrorEncrypter == nil:
+				// No message to encrypt, locally sourced
+				// payment.
 
-		return source.HandleSwitchPacket(packet)
+			case packet.isResolution:
+				// If this is a resolution message, then we'll need to encrypt
+				// it as it's actually internally sourced.
+				var err error
+				// TODO(roasbeef): don't need to pass actually?
+				failure := &lnwire.FailPermanentChannelFailure{}
+				fail.Reason, err = circuit.ErrorEncrypter.EncryptFirstHop(
+					failure,
+				)
+				if err != nil {
+					err = errors.Errorf("unable to obfuscate "+
+						"error: %v", err)
+					log.Error(err)
+				}
 
-	case *lnwire.UpdateFailHTLC:
-		var (
-			//circuit *PaymentCircuit
-			err error
-		)
-
-		// If the source of this packet has not been set, use the
-		// circuit map to lookup the origin.
-		if !packet.hasSource {
-			_, err = s.closeCircuit(htlc, packet)
-			if err != nil {
-				return err
+			default:
+				// Otherwise, it's a forwarded error, so we'll perform a
+				// wrapper encryption as normal.
+				fail.Reason = circuit.ErrorEncrypter.IntermediateEncrypt(
+					fail.Reason,
+				)
 			}
 		}
 
@@ -977,14 +930,6 @@ func (s *Switch) handlePacketForward(packet *htlcPacket) error {
 			log.Warn(err)
 			return nil
 		}
-
-		/*
-			// TODO(conner): batch teardown by only modifying memory here,
-			// and batching at source link.
-			if err := s.teardownCircuit(circuit, packet); err != nil {
-				return err
-			}
-		*/
 
 		return source.HandleSwitchPacket(packet)
 
@@ -1017,8 +962,7 @@ func (s *Switch) failAddPacket(source ChannelLink,
 	if err = source.HandleSwitchPacket(&htlcPacket{
 		incomingChanID: packet.incomingChanID,
 		incomingHTLCID: packet.incomingHTLCID,
-		hasSource:      true,
-		localFailure:   true,
+		circuit:        packet.circuit,
 		htlc: &lnwire.UpdateFailHTLC{
 			Reason: reason,
 		},
@@ -1037,55 +981,35 @@ func (s *Switch) failAddPacket(source ChannelLink,
 // attempts to determine the source that forwarded this htlc. This method will
 // set the incoming chan and htlc ID of the given packet if the source was
 // found, and will properly [re]encrypt any failure messages.
-func (s *Switch) closeCircuit(htlc lnwire.Message, pkt *htlcPacket) (*PaymentCircuit, error) {
+func (s *Switch) closeCircuit(pkt *htlcPacket) (*PaymentCircuit, error) {
 	// Use circuit map to find the link to forward settle/fail to.
-	circuit := s.lookupKeystone(pkt.outKey())
+
+	var circuit *PaymentCircuit
+	if pkt.hasSource {
+		circuit = s.lookupCircuit(pkt.inKey())
+	} else {
+		circuit = s.lookupKeystone(pkt.outKey())
+	}
+
 	if circuit == nil {
-		err := errors.Errorf("Unable to find target channel for HTLC "+
-			"settle/fail: channel ID = %s, HTLC ID = %d",
+		err := errors.Errorf("Unable to find target channel for "+
+			"HTLC settle/fail: channel ID = %s, HTLC ID = %d",
 			pkt.outgoingChanID, pkt.outgoingHTLCID)
 		log.Error(err)
 		return nil, err
 	}
 
-	s.circuits.Close(pkt.inKey())
+	pkt.circuit = circuit
 
-	pkt.incomingChanID = circuit.Incoming.ChanID
-	pkt.incomingHTLCID = circuit.Incoming.HtlcID
-
-	// If the error encrypter is nil, this is a local payment so we don't
-	// need to reencrypt the error message.
-	if circuit.ErrorEncrypter == nil {
-		return circuit, nil
+	if !pkt.hasSource {
+		pkt.incomingChanID = circuit.Incoming.ChanID
+		pkt.incomingHTLCID = circuit.Incoming.HtlcID
 	}
 
-	// Otherwise, obfuscate the error message any fail updates before
-	// sending back through the circuit.
-	if fail, ok := htlc.(*lnwire.UpdateFailHTLC); ok {
-		// If this is a resolution message, then we'll need to encrypt
-		// it as it's actually internally sourced.
-		if pkt.isResolution {
-			var err error
-			// TODO(roasbeef): don't need to pass actually?
-			failure := &lnwire.FailPermanentChannelFailure{}
-			fail.Reason, err = circuit.ErrorEncrypter.EncryptFirstHop(
-				failure,
-			)
-			if err != nil {
-				err = errors.Errorf("unable to obfuscate "+
-					"error: %v", err)
-				log.Error(err)
-			}
-		} else {
-			// Otherwise, it's a forwarded error, so we'll perform a
-			// wrapper encryption as normal.
-			fail.Reason = circuit.ErrorEncrypter.IntermediateEncrypt(
-				fail.Reason,
-			)
-		}
-	}
+	err := s.circuits.Close(pkt.inKey())
+	log.Errorf("circuit close: %v", err)
 
-	return circuit, nil
+	return circuit, err
 }
 
 // teardownCircuit removes a pending or open circuit from the switch's circuit
