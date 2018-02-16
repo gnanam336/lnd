@@ -1480,10 +1480,11 @@ func newSingleLinkTestHarness(chanAmt, chanReserve btcutil.Amount) (
 		UpdateContractSignals: func(*contractcourt.ContractSignals) error {
 			return nil
 		},
-		Registry:    invoiceRegistry,
-		ChainEvents: &contractcourt.ChainEventSubscription{},
-		BlockEpochs: globalEpoch,
-		BatchTicker: ticker,
+		Registry:       invoiceRegistry,
+		ChainEvents:    &contractcourt.ChainEventSubscription{},
+		BlockEpochs:    globalEpoch,
+		BatchTicker:    ticker,
+		FwdPkgGCTicker: NewBatchTicker(time.NewTicker(5 * time.Second)),
 		// Make the BatchSize large enough to not
 		// trigger commit update automatically during tests.
 		BatchSize: 10000,
@@ -1693,7 +1694,7 @@ func TestChannelLinkBandwidthConsistency(t *testing.T) {
 	defer cleanUp()
 
 	var (
-		bobChanID              = lnwire.NewShortChanIDFromInt(3)
+		carolChanID            = lnwire.NewShortChanIDFromInt(3)
 		mockBlob               [lnwire.OnionPacketSize]byte
 		coreChan               = aliceLink.(*channelLink).channel
 		coreLink               = aliceLink.(*channelLink)
@@ -1745,6 +1746,7 @@ func TestChannelLinkBandwidthConsistency(t *testing.T) {
 		t.Fatalf("unable to commit circuit: %v", err)
 	}
 
+	addPkt.circuit = &circuit
 	if err := aliceLink.HandleSwitchPacket(&addPkt); err != nil {
 		t.Fatalf("unable to handle switch packet: %v", err)
 	}
@@ -1805,11 +1807,6 @@ func TestChannelLinkBandwidthConsistency(t *testing.T) {
 	// Now that it is settled, Alice should have gotten the htlc fee back.
 	assertLinkBandwidth(t, aliceLink, aliceStartingBandwidth-htlcAmt)
 
-	err = coreLink.cfg.Switch.deleteCircuit(addPkt.inKey())
-	if err != nil {
-		t.Fatalf("unable to remove circuit: %v", err)
-	}
-
 	// Next, we'll add another HTLC initiated by the switch (of the same
 	// amount as the prior one).
 	invoice, htlc, err = generatePayment(htlcAmt, htlcAmt, 5, mockBlob)
@@ -1829,6 +1826,7 @@ func TestChannelLinkBandwidthConsistency(t *testing.T) {
 		t.Fatalf("unable to commit circuit: %v", err)
 	}
 
+	addPkt.circuit = &circuit
 	if err := aliceLink.HandleSwitchPacket(&addPkt); err != nil {
 		t.Fatalf("unable to handle switch packet: %v", err)
 	}
@@ -1887,11 +1885,6 @@ func TestChannelLinkBandwidthConsistency(t *testing.T) {
 	// Now the bancdwidth should reflect the failed HTLC.
 	assertLinkBandwidth(t, aliceLink, aliceStartingBandwidth-htlcAmt)
 
-	err = coreLink.cfg.Switch.deleteCircuit(addPkt.inKey())
-	if err != nil {
-		t.Fatalf("unable to remove circuit: %v", err)
-	}
-
 	// Moving along, we'll now receive a new HTLC from the remote peer,
 	// with an ID of 0 as this is their first HTLC. The bandwidth should
 	// remain unchanged (but Alice will need to pay the fee for the extra
@@ -1936,25 +1929,41 @@ func TestChannelLinkBandwidthConsistency(t *testing.T) {
 
 	addPkt = htlcPacket{
 		htlc:           htlc,
-		incomingChanID: bobChanID,
+		incomingChanID: aliceLink.ShortChanID(),
 		incomingHTLCID: 0,
 		obfuscator:     NewMockObfuscator(),
+	}
+
+	circuit = makePaymentCircuit(&htlc.PaymentHash, &addPkt)
+	_, _, _, err = coreLink.cfg.Switch.commitCircuits(&circuit)
+	if err != nil {
+		t.Fatalf("unable to commit circuit: %v", err)
+	}
+
+	addPkt.outgoingChanID = carolChanID
+	addPkt.outgoingHTLCID = 0
+
+	err = coreLink.cfg.Switch.setKeystone(addPkt.inKey(), addPkt.outKey())
+	if err != nil {
+		t.Fatalf("unable to set keystone: %v", err)
 	}
 
 	// Next, we'll settle the HTLC with our knowledge of the pre-image that
 	// we eventually learn (simulating a multi-hop payment). The bandwidth
 	// of the channel should now be re-balanced to the starting point.
 	settlePkt := htlcPacket{
-		incomingChanID: bobChanID,
+		incomingChanID: aliceLink.ShortChanID(),
 		incomingHTLCID: 0,
+		circuit:        &circuit,
+		outgoingChanID: addPkt.outgoingChanID,
+		outgoingHTLCID: addPkt.outgoingHTLCID,
 		htlc: &lnwire.UpdateFulfillHTLC{
 			ID:              0,
 			PaymentPreimage: invoice.Terms.PaymentPreimage,
 		},
-		outgoingChanID: aliceLink.ShortChanID(),
-		outgoingHTLCID: 0,
-		obfuscator:     NewMockObfuscator(),
+		obfuscator: NewMockObfuscator(),
 	}
+
 	if err := aliceLink.HandleSwitchPacket(&settlePkt); err != nil {
 		t.Fatalf("unable to handle switch packet: %v", err)
 	}
@@ -2024,7 +2033,7 @@ func TestChannelLinkBandwidthConsistency(t *testing.T) {
 
 	addPkt = htlcPacket{
 		htlc:           htlc,
-		incomingChanID: bobChanID,
+		incomingChanID: aliceLink.ShortChanID(),
 		incomingHTLCID: 1,
 		obfuscator:     NewMockObfuscator(),
 	}
@@ -2035,7 +2044,7 @@ func TestChannelLinkBandwidthConsistency(t *testing.T) {
 		t.Fatalf("unable to commit circuit: %v", err)
 	}
 
-	addPkt.outgoingChanID = aliceLink.ShortChanID()
+	addPkt.outgoingChanID = carolChanID
 	addPkt.outgoingHTLCID = 1
 
 	err = coreLink.cfg.Switch.setKeystone(addPkt.inKey(), addPkt.outKey())
@@ -2044,14 +2053,15 @@ func TestChannelLinkBandwidthConsistency(t *testing.T) {
 	}
 
 	failPkt := htlcPacket{
-		incomingChanID: bobChanID,
+		incomingChanID: aliceLink.ShortChanID(),
 		incomingHTLCID: 1,
+		circuit:        &circuit,
+		outgoingChanID: addPkt.outgoingChanID,
+		outgoingHTLCID: addPkt.outgoingHTLCID,
 		htlc: &lnwire.UpdateFailHTLC{
 			ID: 1,
 		},
-		outgoingChanID: aliceLink.ShortChanID(),
-		outgoingHTLCID: 1,
-		obfuscator:     NewMockObfuscator(),
+		obfuscator: NewMockObfuscator(),
 	}
 
 	if err := aliceLink.HandleSwitchPacket(&failPkt); err != nil {
@@ -2136,6 +2146,7 @@ func TestChannelLinkBandwidthConsistencyOverflow(t *testing.T) {
 			t.Fatalf("unable to commit circuit: %v", err)
 		}
 
+		addPkt.circuit = &circuit
 		aliceLink.HandleSwitchPacket(addPkt)
 		return invoice.Terms.PaymentPreimage
 	}
