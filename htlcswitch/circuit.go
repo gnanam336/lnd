@@ -106,6 +106,12 @@ type PaymentCircuit struct {
 	// ErrorEncrypter is used to re-encrypt the onion failure before
 	// sending it back to the originator of the payment.
 	ErrorEncrypter ErrorEncrypter
+
+	// LoadedFromDisk is set true for any circuits loaded after the circuit
+	// map is reloaded from disk.
+	// NOTE: This value is determined implicitly during a restart, it is not
+	// persisted.
+	LoadedFromDisk bool
 }
 
 // HasKeystone returns true if an outgoing link has assigned an this circuit's
