@@ -184,6 +184,7 @@ func (cm *circuitMap) restoreMemState() error {
 				return err
 			}
 
+			circuit.LoadedFromDisk = true
 			pending[circuit.Incoming] = circuit
 
 			return nil
@@ -335,9 +336,29 @@ func (cm *circuitMap) CommitCircuits(circuits ...*PaymentCircuit,
 	for _, circuit := range circuits {
 		inKey := circuit.InKey()
 		if foundCircuit, ok := cm.pending[inKey]; ok {
-			if foundCircuit.HasKeystone() {
+			switch {
+
+			// This circuit has a keystone, it's waiting for a
+			// response from the remote peer on the outgoing link.
+			// Drop it like it's hot, ensures duplicates get caught.
+			case foundCircuit.HasKeystone():
 				drops = append(drops, circuit)
-			} else {
+
+			// If no keystone is set and the switch has not been
+			// restarted, the corresponding packet should still be
+			// in the outgoing link's mailbox. It will be delivered
+			// if it comes online before the switch goes down.
+			// NOTE: Dropping here prevents a flapping, incoming
+			// link from failing a duplicate add while it is still
+			// in the server's memory mailboxes.
+			case !foundCircuit.LoadedFromDisk:
+				drops = append(drops, circuit)
+
+			// Otherwise, the in-mem packet has been lost due to a
+			// restart. It is now safe to send back a failure along
+			// the incoming link. The incoming link should be able
+			// detect and ignore duplicate packets of this type.
+			default:
 				fails = append(fails, circuit)
 				addFails = append(addFails, circuit)
 			}
