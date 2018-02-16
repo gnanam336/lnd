@@ -52,7 +52,8 @@ type memoryMailBox struct {
 	started uint32
 	stopped uint32
 
-	wireMessages []lnwire.Message
+	wireMessages *list.List
+	wireHead     *list.Element
 	wireMtx      sync.Mutex
 	wireCond     *sync.Cond
 
@@ -75,13 +76,14 @@ type memoryMailBox struct {
 // newMemoryMailBox creates a new instance of the memoryMailBox.
 func newMemoryMailBox() *memoryMailBox {
 	box := &memoryMailBox{
-		quit:          make(chan struct{}),
-		messageOutbox: make(chan lnwire.Message),
-		msgReset:      make(chan chan struct{}, 1),
-		pktOutbox:     make(chan *htlcPacket),
-		pktReset:      make(chan chan struct{}, 1),
+		wireMessages:  list.New(),
 		htlcPkts:      list.New(),
+		messageOutbox: make(chan lnwire.Message),
+		pktOutbox:     make(chan *htlcPacket),
+		msgReset:      make(chan chan struct{}, 1),
+		pktReset:      make(chan chan struct{}, 1),
 		pktIndex:      make(map[CircuitKey]*list.Element),
+		quit:          make(chan struct{}),
 	}
 	box.wireCond = sync.NewCond(&box.wireMtx)
 	box.pktCond = sync.NewCond(&box.pktMtx)
@@ -211,12 +213,12 @@ func (m *memoryMailBox) mailCourier(cType courierType) {
 		switch cType {
 		case wireCourier:
 			m.wireCond.L.Lock()
-			for len(m.wireMessages) == 0 {
+			for m.wireMessages.Front() == nil {
 				m.wireCond.Wait()
 
 				select {
 				case msgDone := <-m.msgReset:
-					m.wireMessages = nil
+					m.wireMessages.Init()
 					close(msgDone)
 				case <-m.quit:
 					m.wireCond.L.Unlock()
@@ -251,9 +253,8 @@ func (m *memoryMailBox) mailCourier(cType courierType) {
 		)
 		switch cType {
 		case wireCourier:
-			nextMsg = m.wireMessages[0]
-			m.wireMessages[0] = nil // Set to nil to prevent GC leak.
-			m.wireMessages = m.wireMessages[1:]
+			entry := m.wireMessages.Front()
+			nextMsg = m.wireMessages.Remove(entry).(lnwire.Message)
 		case pktCourier:
 			nextPkt = m.pktHead.Value.(*htlcPacket)
 			m.pktHead = m.pktHead.Next()
@@ -276,7 +277,7 @@ func (m *memoryMailBox) mailCourier(cType courierType) {
 			case m.messageOutbox <- nextMsg:
 			case msgDone := <-m.msgReset:
 				m.wireCond.L.Lock()
-				m.wireMessages = nil
+				m.wireMessages.Init()
 				m.wireCond.L.Unlock()
 				close(msgDone)
 			case <-m.quit:
@@ -307,7 +308,7 @@ func (m *memoryMailBox) AddMessage(msg lnwire.Message) error {
 	// First, we'll lock the condition, and add the message to the end of
 	// the wire message inbox.
 	m.wireCond.L.Lock()
-	m.wireMessages = append(m.wireMessages, msg)
+	m.wireMessages.PushBack(msg)
 	m.wireCond.L.Unlock()
 
 	// With the message added, we signal to the mailCourier that there are
