@@ -551,19 +551,17 @@ func (f *mockChannelLink) completeCircuit(pkt *htlcPacket) error {
 		pkt.outgoingHTLCID = f.htlcID
 		htlc.ID = f.htlcID
 
-		if err := f.htlcSwitch.setKeystone(pkt.inKey(), pkt.outKey()); err != nil {
+		keystone := Keystone{pkt.inKey(), pkt.outKey()}
+		if err := f.htlcSwitch.setKeystones(keystone); err != nil {
 			return err
 		}
 
 		f.htlcID++
 
 	case *lnwire.UpdateFulfillHTLC, *lnwire.UpdateFailHTLC:
-		circuit := f.htlcSwitch.lookupClosedCircuit(pkt.inKey())
-		if circuit != nil {
-			err := f.htlcSwitch.teardownCircuit(circuit, pkt)
-			if err != nil {
-				return err
-			}
+		err := f.htlcSwitch.teardownCircuit(pkt.circuit, pkt)
+		if err != nil {
+			return err
 		}
 	}
 
