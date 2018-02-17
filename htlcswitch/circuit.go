@@ -109,8 +109,8 @@ type PaymentCircuit struct {
 
 	// LoadedFromDisk is set true for any circuits loaded after the circuit
 	// map is reloaded from disk.
-	// NOTE: This value is determined implicitly during a restart, it is not
-	// persisted.
+	// NOTE: This value is determined implicitly during a restart. It is not
+	// persisted, and should never be set outside the circuit map.
 	LoadedFromDisk bool
 }
 
