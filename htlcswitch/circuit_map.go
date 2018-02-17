@@ -340,7 +340,7 @@ func (cm *circuitMap) CommitCircuits(circuits ...*PaymentCircuit,
 
 			// This circuit has a keystone, it's waiting for a
 			// response from the remote peer on the outgoing link.
-			// Drop it like it's hot, ensures duplicates get caught.
+			// Drop it like it's hot, ensure duplicates get caught.
 			case foundCircuit.HasKeystone():
 				drops = append(drops, circuit)
 
@@ -362,11 +362,13 @@ func (cm *circuitMap) CommitCircuits(circuits ...*PaymentCircuit,
 				fails = append(fails, circuit)
 				addFails = append(addFails, circuit)
 			}
-		} else {
-			cm.pending[inKey] = circuit
-			adds = append(adds, circuit)
-			addFails = append(addFails, circuit)
+
+			continue
 		}
+
+		cm.pending[inKey] = circuit
+		adds = append(adds, circuit)
+		addFails = append(addFails, circuit)
 	}
 	cm.mtx.Unlock()
 
